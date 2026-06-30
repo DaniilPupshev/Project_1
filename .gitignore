@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local data and outputs
+data/input/videos/*
+data/input/orders/*
+data/output/faces/*
+data/output/reports/*
+data/output/runs/*
+data/models/*
+data/cashiers/*
+
+# Keep directory structure
+!data/input/videos/.gitkeep
+!data/input/orders/.gitkeep
+!data/output/faces/.gitkeep
+!data/output/reports/.gitkeep
+!data/output/runs/.gitkeep
+!data/models/.gitkeep
+!data/cashiers/.gitkeep
+
+# Large media / model files anywhere
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.pt
+*.onnx
+*.engine
+*.weights
+*.pdparams
+*.pdmodel
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Reports
+*.xlsx
+*.csv

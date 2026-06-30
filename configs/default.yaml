@@ -1,0 +1,191 @@
+project:
+  # Название проекта
+  name: PechVision
+
+  # Часовой пояс - используется в OCR
+  timezone: Europe/Moscow
+
+
+database:
+  # Строка подключения к PostgreSQL.
+  # Формат: postgresql+psycopg://user:password@host:port/database
+  url: postgresql+psycopg://pechvision:pechvision@localhost:5432/pechvision #!!!!!!!
+
+
+paths:
+  # Папка с исходными видеофайлами
+  videos_dir: data/input/videos
+
+  # Папка с файлами чеков CSV/Excel
+  receipts_dir: data/input/orders
+
+  # Папка для сохраненных изображений лиц
+  faces_dir: data/output/faces
+
+  # Папка для итоговых отчетов CSV/XLSX.
+  reports_dir: data/output/reports
+
+  # Папка для промежуточных результатов обработки
+  runs_dir: data/output/runs
+
+  # Папка с локальными ML-моделями
+  models_dir: data/models
+
+  # Папка с фото и embeddings кассиров для исключения из обработки
+  cashiers_dir: data/cashiers
+
+
+video:
+  # Шаг обработки кадров: 3 означает анализировать каждый третий кадр
+  frame_step: 3
+
+  # Минимальное время нахождения в зоне кассы, чтобы считать событие визитом
+  min_visit_seconds: 3
+
+  # Поддерживаемые расширения видеофайлов
+  supported_extensions:
+    - .mp4
+    - .avi
+    - .mov
+
+
+ocr:
+  # Включает или отключает OCR времени с изображения видео
+  enabled: true
+
+  # Формат даты и времени, который ожидается после OCR
+  # Пример на видео: 06-22-2026 Mon 10:01:58
+  datetime_format: "%m-%d-%Y %a %H:%M:%S"
+
+  # Область кадра, где находится дата и время
+  crop:
+    # X-координата левого верхнего угла OCR-области
+    x: 0
+
+    # Y-координата левого верхнего угла OCR-области
+    y: 0
+
+    # Ширина OCR-области в пикселях
+    width: 520
+
+    # Высота OCR-области в пикселях
+    height: 70
+
+  # Если true, OCR читается в основном на событиях входа/выхода, а не на каждом кадре
+  read_on_events_only: true
+
+  # Максимальный разрыв в секундах, при котором время можно восстановить интерполяцией
+  max_interpolation_gap_seconds: 300
+
+
+cashier_zone:
+  # Правило определения положения человека относительно зоны
+  # bottom_center означает нижняя центральная точка bbox человека
+  point_policy: bottom_center
+
+  # Полигон зоны кассы в координатах кадра
+  # Формат каждой точки: [x, y]
+  polygon:
+    - [650, 300]
+    - [1850, 300]
+    - [1850, 1080]
+    - [650, 1080]
+
+
+detection:
+  # Путь к локальной модели детекции людей
+  model_path: data/models/yolo/person_detector.pt
+
+  # Минимальная уверенность детекции человека
+  confidence_threshold: 0.45
+
+  # IoU-порог для удаления дублирующихся bbox
+  iou_threshold: 0.5
+
+  # ID класса человека в COCO/YOLO
+  person_class_id: 0
+
+
+tracking:
+  # Тип трекера для связывания людей между кадрами
+  tracker_type: bytetrack
+
+  # Сколько секунд человек может пропадать из кадра без создания нового визита
+  max_missing_seconds: 90
+
+
+faces:
+  # Backend детекции лиц
+  detector_backend: retinaface
+
+  # Модель для получения face embeddings
+  embeddings_model: Facenet512
+
+  # Порог похожести лиц для распознавания одного и того же человека
+  recognition_threshold: 0.35
+
+  # Минимальный размер лица в пикселях
+  min_face_size: 40
+
+  # Если true, сохраняется лучший кадр лица для каждого визита/трека
+  save_best_face: true
+
+
+demographics:
+  # Включает определение пола и примерного возраста
+  enabled: true
+
+  # Провайдер анализа пола и возраста
+  provider: deepface
+
+  # Размер возрастной группы. 10 означает 20-29, 30-39 и так далее
+  age_bucket_size: 10
+
+
+cashiers:
+  # Включает исключение кассиров из посетителей
+  enabled: true
+
+  # Путь к файлу с embeddings кассиров
+  embeddings_path: data/cashiers/cashier_embeddings.json
+
+  # Порог похожести лица с кассиром для исключения
+  similarity_threshold: 0.35
+
+
+receipts:
+  # Название колонки с временем закрытия/оплаты чека
+  time_column: dl_tm
+
+  # Название колонки с временем открытия заказа
+  open_time_column: openTime
+
+  # Название колонки с уникальным ID чека
+  id_column: OrderId
+
+  # Название колонки с суммой чека
+  amount_column: OrderSum
+
+  # Часовой пояс чеков
+  timezone: Europe/Moscow
+
+
+matching:
+  # Допуск до начала визита: чек может быть на 0 секунд раньше появления у кассы
+  window_before_seconds: 0
+
+  # Допуск после окончания визита: чек может быть на 60 секунд позже ухода из зоны
+  window_after_seconds: 60
+
+  # Правило при нескольких подходящих посетителях: выбрать ближайшего и поставить флаг
+  ambiguity_policy: closest_with_flag
+
+  # Правило для групп: привязать всех людей рядом к чеку с флагом группы
+  group_policy: attach_all_with_group_flag
+
+
+reports:
+  # Форматы итоговых отчетов
+  formats:
+    - csv
+    - xlsx

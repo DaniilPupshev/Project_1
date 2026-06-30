@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pechvision"
+version = "0.1.0"
+description = "Local video analytics pipeline for cashier-zone visitors and receipts."
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.13.0",
+    "click>=8.1.0",
+    "numpy>=1.26.0",
+    "opencv-python>=4.9.0",
+    "openpyxl>=3.1.0",
+    "pandas>=2.2.0",
+    "psycopg[binary]>=3.1.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "sqlalchemy>=2.0.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "ultralytics>=8.3.0",
+    "paddleocr>=2.8.0",
+    "deepface>=0.0.93",
+]
+dev = [
+    "ruff>=0.5.0",
+    "pytest>=8.2.0",
+]
+
+[project.scripts]
+pechvision = "pechvision.cli.main:cli"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["pechvision*"]
+exclude = ["data*", "configs*", "alembic*"]
