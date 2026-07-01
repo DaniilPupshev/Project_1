@@ -9,7 +9,7 @@ project:
 database:
   # Строка подключения к PostgreSQL.
   # Формат: postgresql+psycopg://user:password@host:port/database
-  url: postgresql+psycopg://pechvision:pechvision@localhost:5432/pechvision #!!!!!!!
+  url: postgresql+psycopg://pechvision:pechvision@localhost:5432/pechvision
 
 
 paths:
