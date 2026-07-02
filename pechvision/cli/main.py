@@ -3,7 +3,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from pechvision.config.loader import load_config
-from pechvision.db.session import make_engine
+from pechvision.db.session import make_engine, make_session_factory
+from pechvision.receipts.importer import import_receipts
 
 
 @click.group()
@@ -53,3 +54,34 @@ def db_check(config_path: str) -> None:
     click.echo('-' * 20)
     click.echo(f'DATABASE_URL: {engine.url}')
     click.echo(f'Result: {result}')
+
+
+@cli.command('import-receipts')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('receipts_path', type=click.Path(exists=True, dir_okay=False))
+def import_receipts_command(config_path: str, receipts_path: str) -> None:
+    '''Импорт чеков в БД'''
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+
+    session = session_factory()
+
+    try:
+        stats = import_receipts(
+            session=session,
+            path=receipts_path
+        )
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(f'Ошибка импорта чеков: {exc}') from exc
+    finally:
+        session.close()
+
+    click.echo('RECEIPTS IMPORT FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'File: {receipts_path}')
+    click.echo(f'Total rows: {stats["all_rows"]}')
+    click.echo(f'Created: {stats["created"]}')
+    click.echo(f'Skipped: {stats["skipped"]}')
