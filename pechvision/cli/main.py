@@ -5,6 +5,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from pechvision.config.loader import load_config
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
+from pechvision.video.registry import register_video
 
 
 @click.group()
@@ -22,7 +23,10 @@ def version() -> None:
 @cli.command('config-check')
 @click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
 def config_check(config_path: str) -> None:
-    '''Проверка файла конфигурации'''
+    '''
+    Проверка файла конфигурации;
+    [Arg]: config_path
+    '''
 
     config = load_config(config_path)
 
@@ -39,7 +43,10 @@ def config_check(config_path: str) -> None:
 @cli.command('db-check')
 @click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
 def db_check(config_path: str) -> None:
-    '''Проверка подключения к БД'''
+    '''
+    Проверка подключения к БД;
+    [Arg]: config_path
+    '''
 
     config = load_config(config_path)
     engine = make_engine(config)
@@ -60,7 +67,10 @@ def db_check(config_path: str) -> None:
 @click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
 @click.argument('receipts_path', type=click.Path(exists=True, dir_okay=False))
 def import_receipts_command(config_path: str, receipts_path: str) -> None:
-    '''Импорт чеков в БД'''
+    '''
+    Импорт чеков в БД;
+    [Arg]: config_path, receipts_path
+    '''
 
     config = load_config(config_path)
     engine = make_engine(config)
@@ -85,3 +95,37 @@ def import_receipts_command(config_path: str, receipts_path: str) -> None:
     click.echo(f'Total rows: {stats["all_rows"]}')
     click.echo(f'Created: {stats["created"]}')
     click.echo(f'Skipped: {stats["skipped"]}')
+
+
+@cli.command('register-video')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+def registry_videos_command(config_path: str, video_path: str) -> None:
+    '''
+    Регистрация видео в БД;
+    [Arg]: config_path, video_path
+    '''
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+
+    session = session_factory()
+
+    try:
+        video, created = register_video(
+            session=session,
+            path=video_path
+        )
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(f'Ошибка регистрации видео: {exc}') from exc
+    finally:
+        session.close()
+
+    click.echo('VIDEO REGISTRATION FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'File: {video_path}')
+    click.echo(f'Video ID: {video.id}')
+    click.echo(f'Filename: {video.filename}')
+    click.echo(f'Created: {created}')
