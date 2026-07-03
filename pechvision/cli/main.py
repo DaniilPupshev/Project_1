@@ -6,6 +6,7 @@ from pechvision.config.loader import load_config
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
 from pechvision.video.registry import register_video
+from pechvision.video.runs import create_processing_run
 
 
 @click.group()
@@ -129,3 +130,47 @@ def registry_videos_command(config_path: str, video_path: str) -> None:
     click.echo(f'Video ID: {video.id}')
     click.echo(f'Filename: {video.filename}')
     click.echo(f'Created: {created}')
+
+
+@cli.command('create-run')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+def create_run_command(config_path: str, video_path: str) -> None:
+    '''
+    Создание процесса обработки
+    [Arg]: config_path, video_path
+    '''
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+
+    session = session_factory()
+
+    try:
+        video, created = register_video(
+            session=session,
+            path=video_path
+        )
+        processing_run = create_processing_run(
+            session=session,
+            video=video,
+            config_path=config_path
+        )
+
+        video_id = video.id
+        run_id = processing_run.id
+        run_status = processing_run.status
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(f'Ошибка создания процесса обработки: {exc}') from exc
+    finally:
+        session.close()
+
+    click.echo('PROCESSING_RUN CREATE FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'File: {video_path}')
+    click.echo(f'Video ID: {video_id}')
+    click.echo(f'Run ID: {run_id}')
+    click.echo(f'Status: {run_status}')
+    click.echo(f'Created video: {created}')
