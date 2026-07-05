@@ -1,4 +1,5 @@
 import click
+import cv2
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -8,6 +9,7 @@ from pechvision.receipts.importer import import_receipts
 from pechvision.video.frames import iter_video_frames
 from pechvision.video.metadata import read_video_metadata
 from pechvision.video.registry import register_video
+from pechvision.video.roi import crop_frame
 from pechvision.video.runs import create_processing_run
 
 
@@ -195,7 +197,7 @@ def video_frames_check_command(
 ) -> None:
     '''
     Проверка чтения кадров видео;
-    [Arg]: config_path, video_path
+    [Arg]: config_path, video_path, limit
     '''
 
     if limit < 1:
@@ -231,3 +233,60 @@ def video_frames_check_command(
             break
 
     click.echo(f'Printed: {printed}')
+
+
+@cli.command('ocr-crop-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--frame-index',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Номер кадра для проверки',
+)
+def ocr_crop_check_command(
+    config_path: str,
+    video_path: str,
+    frame_index: int,
+) -> None:
+    '''
+    Проверка области OCR ROI;
+    [Arg]: config_path, video_path, frame_index
+    '''
+
+    if frame_index < 0:
+        raise click.ClickException('frame_index должен быть >= 0')
+
+    config = load_config(config_path)
+    output_dir = config.paths.runs_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / f'ocr_crop_check_frame_{frame_index}.jpg'
+
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        raise click.ClickException(f'Не удалось открыть видео: {video_path}')
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+
+        if not success:
+            raise click.ClickException(f'Не удалось прочитать кадр: {frame_index}')
+
+        crop = crop_frame(frame, config.ocr.crop)
+        saved = cv2.imwrite(str(output_path), crop)
+
+        if not saved:
+            raise click.ClickException(f'Не удалось сохранить OCR crop: {output_path}')
+    finally:
+        cap.release()
+
+    click.echo('OCR CROP CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Frame index: {frame_index}')
+    click.echo(f'Crop shape: {crop.shape}')
+    click.echo(f'Output: {output_path}')
