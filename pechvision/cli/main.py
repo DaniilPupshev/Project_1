@@ -5,6 +5,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from pechvision.config.loader import load_config
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
+from pechvision.video.frames import iter_video_frames
+from pechvision.video.metadata import read_video_metadata
 from pechvision.video.registry import register_video
 from pechvision.video.runs import create_processing_run
 
@@ -174,3 +176,58 @@ def create_run_command(config_path: str, video_path: str) -> None:
     click.echo(f'Run ID: {run_id}')
     click.echo(f'Status: {run_status}')
     click.echo(f'Created video: {created}')
+
+
+@cli.command('video-frames-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--limit',
+    type=int,
+    default=5,
+    show_default=True,
+    help='Сколько выбранных кадров вывести',
+)
+def video_frames_check_command(
+    config_path: str,
+    video_path: str,
+    limit: int,
+) -> None:
+    '''
+    Проверка чтения кадров видео;
+    [Arg]: config_path, video_path
+    '''
+
+    if limit < 1:
+        raise click.ClickException('limit должен быть >= 1')
+
+    config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
+
+    click.echo('VIDEO FRAMES CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'File: {video_path}')
+    click.echo(f'Frame step: {config.video.frame_step}')
+    click.echo(f'Limit: {limit}')
+
+    printed = 0
+
+    for frame_data in iter_video_frames(
+        path=video_path,
+        frame_step=config.video.frame_step,
+        metadata=metadata,
+    ):
+        frame = frame_data['frame']
+
+        click.echo(
+            f'Frame index: {frame_data["frame_index"]}; '
+            f'Timestamp seconds: {frame_data["timestamp_seconds"]}; '
+            f'Shape: {frame.shape}'
+        )
+
+        printed += 1
+
+        if printed >= limit:
+            break
+
+    click.echo(f'Printed: {printed}')
