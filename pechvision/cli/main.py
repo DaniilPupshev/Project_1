@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from pechvision.config.loader import load_config
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
-from pechvision.video.frames import iter_video_frames
+from pechvision.video.frames import iter_video_frames, iter_video_frames_range
 from pechvision.video.metadata import read_video_metadata
 from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_crop
 from pechvision.video.registry import register_video
@@ -586,3 +586,172 @@ def zone_check_command(
             f'Point: {[point[0], point[1]]}; '
             f'confidence: {detection["confidence"]:.4f}'
         )
+
+
+@cli.command('scan-zone-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-frame',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Первый кадр диапазона проверки',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=300,
+    show_default=True,
+    help='Сколько выбранных кадров обработать',
+)
+@click.option(
+    '--save-limit',
+    type=int,
+    default=10,
+    show_default=True,
+    help='Сколько диагностических кадров сохранить',
+)
+def scan_zone_check_command(
+    config_path: str,
+    video_path: str,
+    start_frame: int,
+    limit: int,
+    save_limit: int,
+) -> None:
+    '''
+    Сканирование диапазона кадров с детекцией людей и фильтрацией зоны;
+    [Arg]: config_path, video_path, start_frame, limit, save_limit
+    '''
+
+    if start_frame < 0:
+        raise click.ClickException('start_frame должен быть >= 0')
+
+    if limit < 1:
+        raise click.ClickException('limit должен быть >= 1')
+
+    if save_limit < 0:
+        raise click.ClickException('save_limit должен быть >= 0')
+
+    config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
+
+    output_dir = config.paths.runs_dir / f'scan_zone_start_{start_frame}'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    processed_frames = 0
+    frames_with_people = 0
+    frames_with_people_in_zone = 0
+    total_detections = 0
+    total_detections_in_zone = 0
+    max_people_in_zone = 0
+    saved_frames = 0
+
+    for frame_data in iter_video_frames_range(
+        path=video_path,
+        frame_step=config.video.frame_step,
+        start_frame=start_frame,
+        limit=limit,
+        metadata=metadata,
+    ):
+        processed_frames += 1
+
+        frame_index = frame_data['frame_index']
+        frame = frame_data['frame']
+
+        detections = detect_people(frame, config.detection)
+        detections_in_zone = filter_detections_in_zone(
+            detections=detections,
+            zone_config=config.cashier_zone,
+        )
+
+        detections_count = len(detections)
+        detections_in_zone_count = len(detections_in_zone)
+
+        total_detections += detections_count
+        total_detections_in_zone += detections_in_zone_count
+        max_people_in_zone = max(max_people_in_zone, detections_in_zone_count)
+
+        if detections_count > 0:
+            frames_with_people += 1
+
+        if detections_in_zone_count > 0:
+            frames_with_people_in_zone += 1
+
+            if saved_frames < save_limit:
+                annotated_frame = frame.copy()
+                polygon_points = np.array(config.cashier_zone.polygon, dtype=np.int32)
+
+                cv2.polylines(
+                    annotated_frame,
+                    [polygon_points],
+                    isClosed=True,
+                    color=(255, 0, 0),
+                    thickness=3,
+                )
+
+                in_zone_bboxes = {
+                    tuple(detection['bbox'])
+                    for detection in detections_in_zone
+                }
+
+                for detection in detections:
+                    bbox = detection['bbox']
+                    x1, y1, x2, y2 = bbox
+
+                    point = get_bbox_point(
+                        bbox=bbox,
+                        point_policy=config.cashier_zone.point_policy,
+                    )
+                    is_in_zone = tuple(bbox) in in_zone_bboxes
+
+                    color = (0, 255, 0) if is_in_zone else (0, 0, 255)
+                    label = 'IN_ZONE' if is_in_zone else 'OUT_ZONE'
+
+                    cv2.rectangle(
+                        annotated_frame,
+                        (x1, y1),
+                        (x2, y2),
+                        color,
+                        3,
+                    )
+                    cv2.circle(
+                        annotated_frame,
+                        point,
+                        8,
+                        color,
+                        -1,
+                    )
+                    cv2.putText(
+                        annotated_frame,
+                        f'{label} {detection["confidence"]:.2f}',
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        color,
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                output_path = output_dir / f'frame_{frame_index}.jpg'
+                saved = cv2.imwrite(str(output_path), annotated_frame)
+
+                if not saved:
+                    raise click.ClickException(f'Не удалось сохранить кадр: {output_path}')
+
+                saved_frames += 1
+
+    click.echo('SCAN ZONE CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Start frame: {start_frame}')
+    click.echo(f'Frame step: {config.video.frame_step}')
+    click.echo(f'Limit: {limit}')
+    click.echo(f'Processed frames: {processed_frames}')
+    click.echo(f'Frames with people: {frames_with_people}')
+    click.echo(f'Frames with people in zone: {frames_with_people_in_zone}')
+    click.echo(f'Total detections: {total_detections}')
+    click.echo(f'Total detections in zone: {total_detections_in_zone}')
+    click.echo(f'Max people in zone: {max_people_in_zone}')
+    click.echo(f'Saved diagnostic frames: {saved_frames}')
+    click.echo(f'Output dir: {output_dir}')
