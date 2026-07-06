@@ -1,5 +1,6 @@
 import click
 import cv2
+import numpy as np
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -12,6 +13,8 @@ from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_cr
 from pechvision.video.registry import register_video
 from pechvision.video.roi import crop_frame
 from pechvision.video.runs import create_processing_run
+from pechvision.vision.person_detector import detect_people
+from pechvision.vision.zone import filter_detections_in_zone, get_bbox_point
 
 
 @click.group()
@@ -363,3 +366,223 @@ def ocr_time_check_command(
     click.echo(f'Parsed datetime: {parsed_datetime}')
     click.echo(f'Output raw: {raw_output_path}')
     click.echo(f'Output prepared: {prepared_output_path}')
+
+
+@cli.command('detect-people-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--frame-index',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Номер кадра для проверки детекции людей',
+)
+def detect_people_check_command(
+    config_path: str,
+    video_path: str,
+    frame_index: int,
+) -> None:
+    '''
+    Проверка детекции людей на одном кадре;
+    [Arg]: config_path, video_path, frame_index
+    '''
+
+    if frame_index < 0:
+        raise click.ClickException('frame_index должен быть >= 0')
+
+    config = load_config(config_path)
+    output_dir = config.paths.runs_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / f'detect_people_frame_{frame_index}.jpg'
+
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        raise click.ClickException(f'Не удалось открыть видео: {video_path}')
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+
+        if not success:
+            raise click.ClickException(f'Не удалось прочитать кадр: {frame_index}')
+
+        detections = detect_people(frame, config.detection)
+        annotated_frame = frame.copy()
+
+        for detection in detections:
+            x1, y1, x2, y2 = detection['bbox']
+            confidence = detection['confidence']
+
+            cv2.rectangle(
+                annotated_frame,
+                (x1, y1),
+                (x2, y2),
+                (0, 255, 0),
+                3,
+            )
+            cv2.putText(
+                annotated_frame,
+                f'person {confidence:.2f}',
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+        saved = cv2.imwrite(str(output_path), annotated_frame)
+
+        if not saved:
+            raise click.ClickException(f'Не удалось сохранить кадр: {output_path}')
+    finally:
+        cap.release()
+
+    click.echo('DETECT PEOPLE CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Frame index: {frame_index}')
+    click.echo(f'Detections: {len(detections)}')
+    click.echo(f'Output: {output_path}')
+
+    for detection in detections:
+        click.echo(
+            f'BBox: {detection["bbox"]}; '
+            f'confidence: {detection["confidence"]:.4f}; '
+            f'class_id: {detection["class_id"]}'
+        )
+
+
+@cli.command('zone-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--frame-index',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Номер кадра для проверки зоны кассы',
+)
+def zone_check_command(
+    config_path: str,
+    video_path: str,
+    frame_index: int,
+) -> None:
+    '''
+    Проверка попадания найденных людей в зону кассы;
+    [Arg]: config_path, video_path, frame_index
+    '''
+
+    if frame_index < 0:
+        raise click.ClickException('frame_index должен быть >= 0')
+
+    config = load_config(config_path)
+    output_dir = config.paths.runs_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / f'zone_check_frame_{frame_index}.jpg'
+
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        raise click.ClickException(f'Не удалось открыть видео: {video_path}')
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+
+        if not success:
+            raise click.ClickException(f'Не удалось прочитать кадр: {frame_index}')
+
+        detections = detect_people(frame, config.detection)
+        detections_in_zone = filter_detections_in_zone(
+            detections=detections,
+            zone_config=config.cashier_zone,
+        )
+
+        in_zone_bboxes = {
+            tuple(detection['bbox'])
+            for detection in detections_in_zone
+        }
+
+        annotated_frame = frame.copy()
+
+        polygon_points = np.array(config.cashier_zone.polygon, dtype=np.int32)
+
+        cv2.polylines(
+            annotated_frame,
+            [polygon_points],
+            isClosed=True,
+            color=(255, 0, 0),
+            thickness=3,
+        )
+
+        for detection in detections:
+            bbox = detection['bbox']
+            x1, y1, x2, y2 = bbox
+
+            point = get_bbox_point(
+                bbox=bbox,
+                point_policy=config.cashier_zone.point_policy,
+            )
+            is_in_zone = tuple(bbox) in in_zone_bboxes
+
+            color = (0, 255, 0) if is_in_zone else (0, 0, 255)
+            label = 'IN_ZONE' if is_in_zone else 'OUT_ZONE'
+
+            cv2.rectangle(
+                annotated_frame,
+                (x1, y1),
+                (x2, y2),
+                color,
+                3,
+            )
+            cv2.circle(
+                annotated_frame,
+                point,
+                8,
+                color,
+                -1,
+            )
+            cv2.putText(
+                annotated_frame,
+                f'{label} {detection["confidence"]:.2f}',
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+
+        saved = cv2.imwrite(str(output_path), annotated_frame)
+
+        if not saved:
+            raise click.ClickException(f'Не удалось сохранить кадр: {output_path}')
+    finally:
+        cap.release()
+
+    click.echo('ZONE CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Frame index: {frame_index}')
+    click.echo(f'Detections: {len(detections)}')
+    click.echo(f'In zone: {len(detections_in_zone)}')
+    click.echo(f'Output: {output_path}')
+
+    for detection in detections:
+        point = get_bbox_point(
+            bbox=detection['bbox'],
+            point_policy=config.cashier_zone.point_policy,
+        )
+        status = 'IN_ZONE' if tuple(detection['bbox']) in in_zone_bboxes else 'OUT_ZONE'
+
+        click.echo(
+            f'{status}; '
+            f'BBox: {detection["bbox"]}; '
+            f'Point: {[point[0], point[1]]}; '
+            f'confidence: {detection["confidence"]:.4f}'
+        )

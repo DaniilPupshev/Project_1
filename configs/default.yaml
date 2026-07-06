@@ -86,15 +86,15 @@ cashier_zone:
   # Полигон зоны кассы в координатах кадра
   # Формат каждой точки: [x, y]
   polygon:
-    - [650, 300]
-    - [1850, 300]
-    - [1850, 1080]
-    - [650, 1080]
+    - [350, 0]
+    - [1450, 0]
+    - [1450, 1080]
+    - [350, 1080]
 
 
 detection:
   # Путь к локальной модели детекции людей
-  model_path: data/models/yolo/person_detector.pt
+  model_path: data/models/yolo/yolo11n.pt
 
   # Минимальная уверенность детекции человека
   confidence_threshold: 0.45
