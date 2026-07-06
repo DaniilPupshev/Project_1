@@ -8,6 +8,7 @@ from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
 from pechvision.video.frames import iter_video_frames
 from pechvision.video.metadata import read_video_metadata
+from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_crop
 from pechvision.video.registry import register_video
 from pechvision.video.roi import crop_frame
 from pechvision.video.runs import create_processing_run
@@ -290,3 +291,75 @@ def ocr_crop_check_command(
     click.echo(f'Frame index: {frame_index}')
     click.echo(f'Crop shape: {crop.shape}')
     click.echo(f'Output: {output_path}')
+
+
+@cli.command('ocr-time-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--frame-index',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Номер кадра для проверки OCR времени',
+)
+def ocr_time_check_command(
+    config_path: str,
+    video_path: str,
+    frame_index: int,
+) -> None:
+    '''
+    Проверка распознавания времени через OCR;
+    [Arg]: config_path, video_path, frame_index
+    '''
+
+    if frame_index < 0:
+        raise click.ClickException('frame_index должен быть >= 0')
+
+    config = load_config(config_path)
+    output_dir = config.paths.runs_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_output_path = output_dir / f'ocr_time_check_frame_{frame_index}_raw.jpg'
+    prepared_output_path = output_dir / f'ocr_time_check_frame_{frame_index}_prepared.jpg'
+
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        raise click.ClickException(f'Не удалось открыть видео: {video_path}')
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+
+        if not success:
+            raise click.ClickException(f'Не удалось прочитать кадр: {frame_index}')
+
+        crop = crop_frame(frame, config.ocr.crop)
+        prepared_crop = preprocess_ocr_crop(crop)
+
+        raw_saved = cv2.imwrite(str(raw_output_path), crop)
+        prepared_saved = cv2.imwrite(str(prepared_output_path), prepared_crop)
+
+        if not raw_saved:
+            raise click.ClickException(f'Не удалось сохранить OCR raw crop: {raw_output_path}')
+
+        if not prepared_saved:
+            raise click.ClickException(
+                f'Не удалось сохранить OCR prepared crop: {prepared_output_path}'
+            )
+
+        raw_text, parsed_datetime = recognize_datetime_from_crop(crop, config.ocr)
+    finally:
+        cap.release()
+
+    click.echo('OCR TIME CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Frame index: {frame_index}')
+    click.echo(f'Crop shape: {crop.shape}')
+    click.echo(f'Prepared crop shape: {prepared_crop.shape}')
+    click.echo(f'OCR text: {raw_text}')
+    click.echo(f'Parsed datetime: {parsed_datetime}')
+    click.echo(f'Output raw: {raw_output_path}')
+    click.echo(f'Output prepared: {prepared_output_path}')
