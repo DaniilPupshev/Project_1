@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import click
 import cv2
 import numpy as np
@@ -5,14 +7,17 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from pechvision.config.loader import load_config
+from pechvision.db.models import ProcessingRun
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
 from pechvision.video.frames import iter_video_frames, iter_video_frames_range, read_video_frame
 from pechvision.video.metadata import read_video_metadata
 from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_crop
+from pechvision.video.pipeline import build_visits_from_video
 from pechvision.video.registry import register_video
 from pechvision.video.roi import crop_frame
 from pechvision.video.runs import create_processing_run
+from pechvision.video.visits_importer import save_visits
 from pechvision.vision.person_detector import detect_people
 from pechvision.vision.tracker import track_people
 from pechvision.vision.visits_builder import VisitsBuilder
@@ -184,6 +189,123 @@ def create_run_command(config_path: str, video_path: str) -> None:
     click.echo(f'Run ID: {run_id}')
     click.echo(f'Status: {run_status}')
     click.echo(f'Created video: {created}')
+
+
+@cli.command('process-video')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-frame',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Первый кадр обработки',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=None,
+    help='Сколько выбранных кадров обработать. Если не задано, обрабатывается все видео',
+)
+def process_video_command(
+    config_path: str,
+    video_path: str,
+    start_frame: int,
+    limit: int | None,
+) -> None:
+    '''
+    Полная обработка видео: регистрация, запуск pipeline, сохранение визитов;
+    [Arg]: config_path, video_path, start_frame, limit
+    '''
+
+    if start_frame < 0:
+        raise click.ClickException('start_frame должен быть >= 0')
+
+    if limit is not None and limit < 1:
+        raise click.ClickException('limit должен быть >= 1')
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+
+    session = session_factory()
+    processing_run_id = None
+
+    try:
+        video, video_created = register_video(
+            session=session,
+            path=video_path,
+        )
+
+        processing_run = create_processing_run(
+            session=session,
+            video=video,
+            config_path=config_path,
+        )
+
+        video_id = video.id
+        processing_run_id = processing_run.id
+
+        processing_run.status = 'running'
+        processing_run.started_at = datetime.now(UTC)
+        session.commit()
+
+        visits = build_visits_from_video(
+            config=config,
+            video_path=video_path,
+            start_frame=start_frame,
+            limit=limit,
+        )
+
+        save_stats = save_visits(
+            session=session,
+            video_id=video_id,
+            processing_run_id=processing_run_id,
+            visits=visits,
+        )
+
+        finished_run = session.get(ProcessingRun, processing_run_id)
+        
+        if finished_run is None:
+            raise click.ClickException(f'Processing run не найден: {processing_run_id}')
+        
+        finished_run.status = 'finished'
+        finished_run.finished_at = datetime.now(UTC)
+        finished_run.stats = {
+            'start_frame': start_frame,
+            'limit': limit,
+            'visits_found': len(visits),
+            'visits_created': save_stats['created'],
+            'video_created': video_created,
+        }
+        session.commit()
+
+    except Exception as exc:
+        session.rollback()
+
+        if processing_run_id is not None:
+            failed_run = session.get(ProcessingRun, processing_run_id)
+            if failed_run is not None:
+                failed_run.status = 'failed'
+                failed_run.finished_at = datetime.now(UTC)
+                failed_run.error_message = str(exc)
+                session.commit()
+
+        raise click.ClickException(f'Ошибка обработки видео: {exc}') from exc
+
+    finally:
+        session.close()
+
+    click.echo('VIDEO PROCESSING FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Video ID: {video_id}')
+    click.echo(f'Run ID: {processing_run_id}')
+    click.echo(f'Start frame: {start_frame}')
+    click.echo(f'Limit: {limit}')
+    click.echo(f'Visits found: {len(visits)}')
+    click.echo(f'Visits created: {save_stats["created"]}')
+    click.echo(f'Video created: {video_created}')
 
 
 @cli.command('video-frames-check')

@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 
 import cv2
@@ -60,15 +61,26 @@ def normalize_camera_datetime_text(text: str | None) -> str:
 
 
 def parse_ocr_datetime(text: str | None, datetime_format: str) -> datetime | None:
-    '''Получение datetime из OCR-текста'''
+    '''Получение datetime из OCR-текста камеры.'''
 
     normalized_text = normalize_camera_datetime_text(text)
 
-    try:
-        return datetime.strptime(normalized_text, datetime_format)
-    except ValueError:
+    date_match = re.search(r'\d{2}-\d{2}-\d{4}', normalized_text)
+    time_match = re.search(r'\d{1,2}[:.]\d{2}[:.]\d{2}', normalized_text)
+
+    if date_match is None or time_match is None:
         return None
 
+    date_text = date_match.group(0)
+    time_text = time_match.group(0).replace('.', ':')
+
+    try:
+        return datetime.strptime(
+            f'{date_text} {time_text}',
+            '%m-%d-%Y %H:%M:%S',
+        )
+    except ValueError:
+        return None
 
 def preprocess_ocr_crop(crop):
     '''Подготовка OCR crop к распознаванию'''

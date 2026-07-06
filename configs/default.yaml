@@ -40,7 +40,7 @@ video:
   frame_step: 3
 
   # Минимальное время нахождения в зоне кассы, чтобы считать событие визитом
-  min_visit_seconds: 2
+  min_visit_seconds: 15
 
   # Поддерживаемые расширения видеофайлов
   supported_extensions:
