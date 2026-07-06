@@ -15,6 +15,7 @@ from pechvision.video.roi import crop_frame
 from pechvision.video.runs import create_processing_run
 from pechvision.vision.person_detector import detect_people
 from pechvision.vision.tracker import track_people
+from pechvision.vision.visits_builder import VisitsBuilder
 from pechvision.vision.zone import filter_detections_in_zone, get_bbox_point
 
 
@@ -935,3 +936,128 @@ def tracking_check_command(
     click.echo(f'Unique track count: {len(unique_track_ids)}')
     click.echo(f'Saved diagnostic frames: {saved_frames}')
     click.echo(f'Output dir: {output_dir}')
+
+
+@cli.command('visits-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-frame',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Первый кадр диапазона проверки',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=300,
+    show_default=True,
+    help='Сколько выбранных кадров обработать',
+)
+def visits_check_command(
+    config_path: str,
+    video_path: str,
+    start_frame: int,
+    limit: int,
+) -> None:
+    '''
+    Проверка формирования визитов из треков в зоне кассы;
+    [Arg]: config_path, video_path, start_frame, limit
+    '''
+
+    if start_frame < 0:
+        raise click.ClickException('start_frame должен быть >= 0')
+
+    if limit < 1:
+        raise click.ClickException('limit должен быть >= 1')
+
+    config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
+
+    visits_builder = VisitsBuilder(
+        max_missing_seconds=config.tracking.max_missing_seconds,
+        min_visit_seconds=config.video.min_visit_seconds,
+    )
+
+    processed_frames = 0
+    frames_with_tracks = 0
+    frames_with_tracks_in_zone = 0
+    total_tracks = 0
+    total_tracks_in_zone = 0
+    unique_track_ids = set()
+    unique_track_ids_in_zone = set()
+
+    for frame_data in iter_video_frames_range(
+        path=video_path,
+        frame_step=config.video.frame_step,
+        start_frame=start_frame,
+        limit=limit,
+        metadata=metadata,
+    ):
+        processed_frames += 1
+
+        frame_index = frame_data['frame_index']
+        timestamp_seconds = frame_data['timestamp_seconds']
+        frame = frame_data['frame']
+
+        tracks = track_people(
+            frame=frame,
+            detection_config=config.detection,
+            tracking_config=config.tracking,
+        )
+        tracks_in_zone = filter_detections_in_zone(
+            detections=tracks,
+            zone_config=config.cashier_zone,
+        )
+
+        total_tracks += len(tracks)
+        total_tracks_in_zone += len(tracks_in_zone)
+
+        if tracks:
+            frames_with_tracks += 1
+
+        if tracks_in_zone:
+            frames_with_tracks_in_zone += 1
+
+        for track in tracks:
+            unique_track_ids.add(track['track_id'])
+
+        for track in tracks_in_zone:
+            unique_track_ids_in_zone.add(track['track_id'])
+
+        visits_builder.update(
+            frame_index=frame_index,
+            timestamp_seconds=timestamp_seconds,
+            tracks_in_zone=tracks_in_zone,
+        )
+
+    visits = visits_builder.finish_all()
+
+    click.echo('VISITS CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Start frame: {start_frame}')
+    click.echo(f'Frame step: {config.video.frame_step}')
+    click.echo(f'Limit: {limit}')
+    click.echo(f'Processed frames: {processed_frames}')
+    click.echo(f'Frames with tracks: {frames_with_tracks}')
+    click.echo(f'Frames with tracks in zone: {frames_with_tracks_in_zone}')
+    click.echo(f'Total tracks: {total_tracks}')
+    click.echo(f'Total tracks in zone: {total_tracks_in_zone}')
+    click.echo(f'Unique track ids: {sorted(unique_track_ids)}')
+    click.echo(f'Unique track ids in zone: {sorted(unique_track_ids_in_zone)}')
+    click.echo(f'Visits found: {len(visits)}')
+    click.echo('')
+
+    for visit in visits:
+        click.echo(
+            f'Track ID: {visit["track_id"]}; '
+            f'entry_frame: {visit["entry_frame_index"]}; '
+            f'exit_frame: {visit["exit_frame_index"]}; '
+            f'entry_ts: {visit["entry_timestamp_seconds"]}; '
+            f'exit_ts: {visit["exit_timestamp_seconds"]}; '
+            f'duration: {visit["duration_seconds"]}; '
+            f'observations: {visit["observations_count"]}; '
+            f'best_confidence: {visit["best_confidence"]:.4f}'
+        )
