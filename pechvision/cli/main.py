@@ -14,6 +14,7 @@ from pechvision.video.registry import register_video
 from pechvision.video.roi import crop_frame
 from pechvision.video.runs import create_processing_run
 from pechvision.vision.person_detector import detect_people
+from pechvision.vision.tracker import track_people
 from pechvision.vision.zone import filter_detections_in_zone, get_bbox_point
 
 
@@ -753,5 +754,184 @@ def scan_zone_check_command(
     click.echo(f'Total detections: {total_detections}')
     click.echo(f'Total detections in zone: {total_detections_in_zone}')
     click.echo(f'Max people in zone: {max_people_in_zone}')
+    click.echo(f'Saved diagnostic frames: {saved_frames}')
+    click.echo(f'Output dir: {output_dir}')
+
+
+@cli.command('tracking-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-frame',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Первый кадр диапазона проверки',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=300,
+    show_default=True,
+    help='Сколько выбранных кадров обработать',
+)
+@click.option(
+    '--save-limit',
+    type=int,
+    default=10,
+    show_default=True,
+    help='Сколько диагностических кадров сохранить',
+)
+def tracking_check_command(
+    config_path: str,
+    video_path: str,
+    start_frame: int,
+    limit: int,
+    save_limit: int,
+) -> None:
+    '''
+    Проверка трекинга людей по диапазону кадров;
+    [Arg]: config_path, video_path, start_frame, limit, save_limit
+    '''
+
+    if start_frame < 0:
+        raise click.ClickException('start_frame должен быть >= 0')
+
+    if limit < 1:
+        raise click.ClickException('limit должен быть >= 1')
+
+    if save_limit < 0:
+        raise click.ClickException('save_limit должен быть >= 0')
+
+    config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
+
+    output_dir = config.paths.runs_dir / f'tracking_start_{start_frame}'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    processed_frames = 0
+    frames_with_tracks = 0
+    frames_with_tracks_in_zone = 0
+    total_tracks = 0
+    total_tracks_in_zone = 0
+    max_tracks_in_zone = 0
+    saved_frames = 0
+    unique_track_ids = set()
+
+    for frame_data in iter_video_frames_range(
+        path=video_path,
+        frame_step=config.video.frame_step,
+        start_frame=start_frame,
+        limit=limit,
+        metadata=metadata,
+    ):
+        processed_frames += 1
+
+        frame_index = frame_data['frame_index']
+        frame = frame_data['frame']
+
+        tracks = track_people(
+            frame=frame,
+            detection_config=config.detection,
+            tracking_config=config.tracking,
+        )
+        tracks_in_zone = filter_detections_in_zone(
+            detections=tracks,
+            zone_config=config.cashier_zone,
+        )
+
+        tracks_count = len(tracks)
+        tracks_in_zone_count = len(tracks_in_zone)
+
+        total_tracks += tracks_count
+        total_tracks_in_zone += tracks_in_zone_count
+        max_tracks_in_zone = max(max_tracks_in_zone, tracks_in_zone_count)
+
+        for track in tracks:
+            unique_track_ids.add(track['track_id'])
+
+        if tracks_count > 0:
+            frames_with_tracks += 1
+
+        if tracks_in_zone_count > 0:
+            frames_with_tracks_in_zone += 1
+
+        if tracks_in_zone_count > 0 and saved_frames < save_limit:
+            annotated_frame = frame.copy()
+            polygon_points = np.array(config.cashier_zone.polygon, dtype=np.int32)
+
+            cv2.polylines(
+                annotated_frame,
+                [polygon_points],
+                isClosed=True,
+                color=(255, 0, 0),
+                thickness=3,
+            )
+
+            in_zone_track_ids = {
+                track['track_id']
+                for track in tracks_in_zone
+            }
+
+            for track in tracks:
+                bbox = track['bbox']
+                x1, y1, x2, y2 = bbox
+
+                point = get_bbox_point(
+                    bbox=bbox,
+                    point_policy=config.cashier_zone.point_policy,
+                )
+                is_in_zone = track['track_id'] in in_zone_track_ids
+
+                color = (0, 255, 0) if is_in_zone else (0, 0, 255)
+                label = 'IN_ZONE' if is_in_zone else 'OUT_ZONE'
+
+                cv2.rectangle(
+                    annotated_frame,
+                    (x1, y1),
+                    (x2, y2),
+                    color,
+                    3,
+                )
+                cv2.circle(
+                    annotated_frame,
+                    point,
+                    8,
+                    color,
+                    -1,
+                )
+                cv2.putText(
+                    annotated_frame,
+                    f'{label} id={track["track_id"]} {track["confidence"]:.2f}',
+                    (x1, max(y1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            output_path = output_dir / f'frame_{frame_index}.jpg'
+            saved = cv2.imwrite(str(output_path), annotated_frame)
+
+            if not saved:
+                raise click.ClickException(f'Не удалось сохранить кадр: {output_path}')
+
+            saved_frames += 1
+
+    click.echo('TRACKING CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Start frame: {start_frame}')
+    click.echo(f'Frame step: {config.video.frame_step}')
+    click.echo(f'Limit: {limit}')
+    click.echo(f'Processed frames: {processed_frames}')
+    click.echo(f'Frames with tracks: {frames_with_tracks}')
+    click.echo(f'Frames with tracks in zone: {frames_with_tracks_in_zone}')
+    click.echo(f'Total tracks: {total_tracks}')
+    click.echo(f'Total tracks in zone: {total_tracks_in_zone}')
+    click.echo(f'Max tracks in zone: {max_tracks_in_zone}')
+    click.echo(f'Unique track ids: {sorted(unique_track_ids)}')
+    click.echo(f'Unique track count: {len(unique_track_ids)}')
     click.echo(f'Saved diagnostic frames: {saved_frames}')
     click.echo(f'Output dir: {output_dir}')
