@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from pechvision.config.loader import load_config
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.receipts.importer import import_receipts
-from pechvision.video.frames import iter_video_frames, iter_video_frames_range
+from pechvision.video.frames import iter_video_frames, iter_video_frames_range, read_video_frame
 from pechvision.video.metadata import read_video_metadata
 from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_crop
 from pechvision.video.registry import register_video
@@ -1060,4 +1060,146 @@ def visits_check_command(
             f'duration: {visit["duration_seconds"]}; '
             f'observations: {visit["observations_count"]}; '
             f'best_confidence: {visit["best_confidence"]:.4f}'
+        )
+
+
+@cli.command('visits-ocr-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-frame',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Первый кадр диапазона проверки',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=300,
+    show_default=True,
+    help='Сколько выбранных кадров обработать',
+)
+def visits_ocr_check_command(
+    config_path: str,
+    video_path: str,
+    start_frame: int,
+    limit: int,
+) -> None:
+    '''
+    Проверка формирования визитов с OCR-временем входа и выхода;
+    [Arg]: config_path, video_path, start_frame, limit
+    '''
+
+    if start_frame < 0:
+        raise click.ClickException('start_frame должен быть >= 0')
+
+    if limit < 1:
+        raise click.ClickException('limit должен быть >= 1')
+
+    config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
+
+    visits_builder = VisitsBuilder(
+        max_missing_seconds=config.tracking.max_missing_seconds,
+        min_visit_seconds=config.video.min_visit_seconds,
+    )
+
+    processed_frames = 0
+    frames_with_tracks = 0
+    frames_with_tracks_in_zone = 0
+
+    for frame_data in iter_video_frames_range(
+        path=video_path,
+        frame_step=config.video.frame_step,
+        start_frame=start_frame,
+        limit=limit,
+        metadata=metadata,
+    ):
+        processed_frames += 1
+
+        frame_index = frame_data['frame_index']
+        timestamp_seconds = frame_data['timestamp_seconds']
+        frame = frame_data['frame']
+
+        tracks = track_people(
+            frame=frame,
+            detection_config=config.detection,
+            tracking_config=config.tracking,
+        )
+        tracks_in_zone = filter_detections_in_zone(
+            detections=tracks,
+            zone_config=config.cashier_zone,
+        )
+
+        if tracks:
+            frames_with_tracks += 1
+
+        if tracks_in_zone:
+            frames_with_tracks_in_zone += 1
+
+        visits_builder.update(
+            frame_index=frame_index,
+            timestamp_seconds=timestamp_seconds,
+            tracks_in_zone=tracks_in_zone,
+        )
+
+    visits = visits_builder.finish_all()
+
+    visits_with_ocr = []
+
+    for visit in visits:
+        entry_frame = read_video_frame(
+            path=video_path,
+            frame_index=visit['entry_frame_index'],
+        )
+        entry_crop = crop_frame(entry_frame, config.ocr.crop)
+        entry_text, ocr_entered_at = recognize_datetime_from_crop(
+            entry_crop,
+            config.ocr,
+        )
+
+        exit_frame = read_video_frame(
+            path=video_path,
+            frame_index=visit['exit_frame_index'],
+        )
+        exit_crop = crop_frame(exit_frame, config.ocr.crop)
+        exit_text, ocr_left_at = recognize_datetime_from_crop(
+            exit_crop,
+            config.ocr,
+        )
+
+        visit_with_ocr = visit.copy()
+        visit_with_ocr['ocr_entry_text'] = entry_text
+        visit_with_ocr['ocr_exit_text'] = exit_text
+        visit_with_ocr['ocr_entered_at'] = ocr_entered_at
+        visit_with_ocr['ocr_left_at'] = ocr_left_at
+
+        visits_with_ocr.append(visit_with_ocr)
+
+    click.echo('VISITS OCR CHECK FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+    click.echo(f'Start frame: {start_frame}')
+    click.echo(f'Frame step: {config.video.frame_step}')
+    click.echo(f'Limit: {limit}')
+    click.echo(f'Processed frames: {processed_frames}')
+    click.echo(f'Frames with tracks: {frames_with_tracks}')
+    click.echo(f'Frames with tracks in zone: {frames_with_tracks_in_zone}')
+    click.echo(f'Visits found: {len(visits)}')
+    click.echo(f'Visits with OCR: {len(visits_with_ocr)}')
+    click.echo('')
+
+    for visit in visits_with_ocr:
+        click.echo(
+            f'Track ID: {visit["track_id"]}; '
+            f'entry_frame: {visit["entry_frame_index"]}; '
+            f'exit_frame: {visit["exit_frame_index"]}; '
+            f'duration: {visit["duration_seconds"]}; '
+            f'ocr_entered_at: {visit["ocr_entered_at"]}; '
+            f'ocr_left_at: {visit["ocr_left_at"]}'
+        )
+        click.echo(
+            f'  OCR entry text: {visit["ocr_entry_text"]}; '
+            f'OCR exit text: {visit["ocr_exit_text"]}'
         )

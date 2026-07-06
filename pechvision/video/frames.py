@@ -125,3 +125,31 @@ def iter_video_frames_range(
             frame_index += 1
     finally:
         cap.release()
+
+
+def read_video_frame(path: str | Path, frame_index: int):
+    '''Читает один кадр видео по frame_index'''
+
+    if frame_index < 0:
+        raise ValueError(
+            f'''
+            Параметр frame_index должен быть >= 0\n
+            Сейчас: frame_index={frame_index}
+            '''
+        )
+
+    cap = cv2.VideoCapture(str(path))
+
+    if not cap.isOpened():
+        raise RuntimeError(f'Не удалось открыть видео: {path}')
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+
+        if not success:
+            raise RuntimeError(f'Не удалось прочитать кадр: {frame_index}')
+
+        return frame
+    finally:
+        cap.release()
