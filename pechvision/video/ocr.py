@@ -5,7 +5,6 @@ from paddleocr import PaddleOCR
 
 from pechvision.config.schema import OCRConfig
 
-
 _ocr_engine: PaddleOCR | None = None
 
 
