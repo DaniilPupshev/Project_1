@@ -14,7 +14,32 @@ class ActiveVisit:
     observations_count: int = 0
     best_confidence: float = 0.0
     last_bbox: list[int] | None = None
+    best_face: dict[str, Any] | None = None
+    observations: list[dict[str, Any]] = field(default_factory=list)
     extra_data: dict[str, Any] = field(default_factory=dict)
+
+
+def sample_observations(
+    observations: list[dict[str, Any]],
+    max_samples: int = 20,
+) -> list[dict[str, Any]]:
+    '''Равномерно выбирает ограниченное количество наблюдений трека.'''
+
+    if len(observations) <= max_samples:
+        return observations
+
+    if max_samples <= 1:
+        return [observations[0]]
+
+    step = (len(observations) - 1) / (max_samples - 1)
+
+    sampled_observations = []
+
+    for sample_index in range(max_samples):
+        observation_index = round(sample_index * step)
+        sampled_observations.append(observations[observation_index])
+
+    return sampled_observations
 
 
 class VisitsBuilder:
@@ -35,38 +60,68 @@ class VisitsBuilder:
         self,
         frame_index: int,
         timestamp_seconds: float | None,
-        tracks_in_zone: list[dict[str, Any]]
+        tracks_in_zone: list[dict[str, Any]],
+        faces_by_track_id: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         '''Обновляет визиты по одному кадру'''
 
+        faces_by_track_id = faces_by_track_id or {}
         seen_track_ids = set()
 
         for track in tracks_in_zone:
             track_id = int(track['track_id'])
             seen_track_ids.add(track_id)
+            face_candidate = faces_by_track_id.get(track_id)
 
             if track_id not in self.active_visits:
+                observation = {
+                    'frame_index': frame_index,
+                    'timestamp_seconds': timestamp_seconds,
+                    'bbox': track['bbox'],
+                    'confidence': float(track['confidence']),
+                }
                 self.active_visits[track_id] = ActiveVisit(
                     track_id=track_id,
                     entry_frame_index=frame_index,
                     last_seen_frame_index=frame_index,
                     entry_timestamp_seconds=timestamp_seconds,
                     last_seen_timestamp_seconds=timestamp_seconds,
+                    observations=[observation],
                     observations_count=1,
                     best_confidence=float(track['confidence']),
                     last_bbox=track['bbox'],
+                )
+                self._update_best_face(
+                    active_visit=self.active_visits[track_id],
+                    face_candidate=face_candidate,
+                    frame_index=frame_index,
+                    timestamp_seconds=timestamp_seconds,
                 )
                 continue
 
             active_visit = self.active_visits[track_id]
             active_visit.last_seen_frame_index = frame_index
             active_visit.last_seen_timestamp_seconds = timestamp_seconds
+            active_visit.observations.append(
+                {
+                    'frame_index': frame_index,
+                    'timestamp_seconds': timestamp_seconds,
+                    'bbox': track['bbox'],
+                    'confidence': float(track['confidence']),
+                }
+            )
             active_visit.observations_count += 1
             active_visit.best_confidence = max(
                 active_visit.best_confidence,
                 float(track['confidence']),
             )
             active_visit.last_bbox = track['bbox']
+            self._update_best_face(
+                active_visit=active_visit,
+                face_candidate=face_candidate,
+                frame_index=frame_index,
+                timestamp_seconds=timestamp_seconds,
+            )
         
         self._close_missing_visits(
             current_timestamp_seconds=timestamp_seconds,
@@ -106,6 +161,33 @@ class VisitsBuilder:
             self._finish_visit(active_visit)
 
 
+    def _update_best_face(
+        self,
+        active_visit: ActiveVisit,
+        face_candidate: dict[str, Any] | None,
+        frame_index: int,
+        timestamp_seconds: float | None,
+    ) -> None:
+        '''Обновляет лучший face candidate активного визита.'''
+
+        if face_candidate is None:
+            return
+
+        candidate = face_candidate.copy()
+        candidate['frame_index'] = frame_index
+        candidate['timestamp_seconds'] = timestamp_seconds
+
+        if active_visit.best_face is None:
+            active_visit.best_face = candidate
+            return
+
+        candidate_score = candidate.get('quality_score') or 0
+        best_score = active_visit.best_face.get('quality_score') or 0
+
+        if candidate_score > best_score:
+            active_visit.best_face = candidate
+
+
     def _finish_visit(self, active_visit: ActiveVisit) -> None:
         '''Перевод активных визитов в завершенные'''
 
@@ -113,6 +195,11 @@ class VisitsBuilder:
 
         if duration_seconds is not None and duration_seconds < self.min_visit_seconds:
             return
+        
+        track_observation_samples = sample_observations(
+            active_visit.observations,
+            max_samples=20,
+        )
 
         self.finished_visits.append(
             {
@@ -124,6 +211,8 @@ class VisitsBuilder:
                 'duration_seconds': duration_seconds,
                 'observations_count': active_visit.observations_count,
                 'best_confidence': active_visit.best_confidence,
+                'best_face': active_visit.best_face,
+                'track_observation_samples': track_observation_samples,
                 'last_bbox': active_visit.last_bbox,
             }
         )

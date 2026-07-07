@@ -55,6 +55,8 @@ def config_check(config_path: str) -> None:
     click.echo(f'Frame step: {config.video.frame_step}')
     click.echo(f'Min visit seconds: {config.video.min_visit_seconds}')
     click.echo(f'Detection model: {config.detection.model_path}\n')
+    click.echo(f'Face model: InsightFace {config.faces.model_name}')
+    click.echo(f'Face model root: {config.faces.model_root}\n')
 
 
 @cli.command('db-check')
@@ -292,6 +294,7 @@ def process_video_command(
             video_id=video_id,
             processing_run_id=processing_run_id,
             visits=visits,
+            faces_dir=config.paths.faces_dir,
         )
 
         finished_run = session.get(ProcessingRun, processing_run_id)
@@ -306,6 +309,7 @@ def process_video_command(
             'limit': limit,
             'visits_found': len(visits),
             'visits_created': save_stats['created'],
+            'faces_created': save_stats['faces_created'],
             'video_created': video_created,
         }
         session.commit()
@@ -338,7 +342,46 @@ def process_video_command(
     click.echo(f'Limit: {limit}')
     click.echo(f'Visits found: {len(visits)}')
     click.echo(f'Visits created: {save_stats["created"]}')
+    click.echo(f'Faces created: {save_stats["faces_created"]}')
     click.echo(f'Video created: {video_created}')
+
+
+@cli.command('run-mvp')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-frame',
+    type=int,
+    default=0,
+    show_default=True,
+    help='Первый кадр обработки',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=None,
+    help='Сколько выбранных кадров обработать. Если не задано, обрабатывается все видео',
+)
+@click.pass_context
+def run_mvp_command(
+    ctx: click.Context,
+    config_path: str,
+    video_path: str,
+    start_frame: int,
+    limit: int | None,
+) -> None:
+    '''
+    MVP-запуск полного текущего pipeline;
+    [Arg]: config_path, video_path, start_frame, limit
+    '''
+
+    ctx.invoke(
+        process_video_command,
+        config_path=config_path,
+        video_path=video_path,
+        start_frame=start_frame,
+        limit=limit,
+    )
 
 
 @cli.command('video-frames-check')

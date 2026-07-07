@@ -115,17 +115,30 @@ tracking:
 
 
 faces:
-  # Backend детекции лиц
-  detector_backend: retinaface
+  # Набор моделей InsightFace для детекции лиц, embeddings и базовых атрибутов
+  model_name: buffalo_l
 
-  # Модель для получения face embeddings
-  embeddings_model: Facenet512
+  # Локальная папка, где InsightFace хранит/ищет модели
+  model_root: data/models/insightface
+
+  # Провайдеры ONNX Runtime. CPUExecutionProvider работает локально на Mac без GPU
+  providers:
+    - CPUExecutionProvider
+
+  # Размер входа детектора лиц InsightFace
+  det_size: [640, 640]
+
+  # Минимальная уверенность детекции лица
+  det_threshold: 0.5
 
   # Порог похожести лиц для распознавания одного и того же человека
   recognition_threshold: 0.35
 
-  # Минимальный размер лица в пикселях
-  min_face_size: 40
+  # Минимальный размер лица в пикселях; для верхней камеры лица часто маленькие
+  min_face_size: 30
+
+  # Как часто искать лица в основном pipeline: 1 = каждый обработанный кадр
+  search_every_processed_frames: 10
 
   # Если true, сохраняется лучший кадр лица для каждого визита/трека
   save_best_face: true
@@ -136,7 +149,7 @@ demographics:
   enabled: true
 
   # Провайдер анализа пола и возраста
-  provider: deepface
+  provider: insightface
 
   # Размер возрастной группы. 10 означает 20-29, 30-39 и так далее
   age_bucket_size: 10

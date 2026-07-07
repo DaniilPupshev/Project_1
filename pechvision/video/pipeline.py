@@ -9,6 +9,7 @@ from pechvision.video.frames import iter_video_frames_range, read_video_frame
 from pechvision.video.metadata import read_video_metadata
 from pechvision.video.ocr import recognize_datetime_from_crop
 from pechvision.video.roi import crop_frame
+from pechvision.vision.faces import detect_faces_for_tracks
 from pechvision.vision.tracker import track_people
 from pechvision.vision.visits_builder import VisitsBuilder
 from pechvision.vision.zone import filter_detections_in_zone
@@ -154,11 +155,24 @@ def build_visits_from_video(
             detections=tracks,
             zone_config=config.cashier_zone,
         )
+        should_search_faces = (
+            config.faces.save_best_face
+            and processed_frames % config.faces.search_every_processed_frames == 0
+        )
+        faces_by_track_id = {}
+
+        if should_search_faces:
+            faces_by_track_id = detect_faces_for_tracks(
+                frame=frame_data['frame'],
+                tracks=tracks_in_zone,
+                config=config,
+            )
 
         visits_builder.update(
             frame_index=frame_data['frame_index'],
             timestamp_seconds=frame_data['timestamp_seconds'],
             tracks_in_zone=tracks_in_zone,
+            faces_by_track_id=faces_by_track_id,
         )
 
         processed_frames += 1

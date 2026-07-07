@@ -62,10 +62,14 @@ class TrackingConfig(BaseModel):
 
 
 class FacesConfig(BaseModel):
-    detector_backend: str
-    embeddings_model: str
+    model_name: str
+    model_root: Path
+    providers: list[str]
+    det_size: tuple[PositiveInt, PositiveInt]
+    det_threshold: float = Field(ge=0.0, le=1.0)
     recognition_threshold: float = Field(ge=0.0, le=1.0)
     min_face_size: PositiveInt
+    search_every_processed_frames: PositiveInt
     save_best_face: bool
 
 
