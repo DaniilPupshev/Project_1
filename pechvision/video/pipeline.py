@@ -1,3 +1,5 @@
+import math
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -86,15 +88,49 @@ def enrich_visit_with_ocr_time(
     return enriched_visit
 
 
+def calculate_processing_total_frames(
+    metadata: dict[str, Any],
+    frame_step: int,
+    start_frame: int = 0,
+    limit: int | None = None
+) -> int | None:
+    '''Считает количество кадров, которые будут реально обработаны.'''
+
+    if limit is not None:
+        return limit
+
+    frame_count = metadata.get('frame_count')
+
+    if frame_count is None:
+        return None
+
+    available_frames = max(0, int(frame_count) - start_frame)
+
+    if available_frames == 0:
+        return 0
+
+    return math.ceil(available_frames / frame_step)
+
+
 def build_visits_from_video(
     config: AppConfig,
     video_path: str | Path,
     start_frame: int = 0,
-    limit: int | None = None
+    limit: int | None = None,
+    progress_callback: Callable[[int, int | None, int, float | None], None] | None = None
 ) -> list[dict[str, Any]]:
     '''Строит визиты по видео и определяет OCR-время'''
 
     metadata = read_video_metadata(video_path)
+
+    total_frames = calculate_processing_total_frames(
+        metadata=metadata,
+        frame_step=config.video.frame_step,
+        start_frame=start_frame,
+        limit=limit,
+    )
+
+    processed_frames = 0
 
     visits_builder = VisitsBuilder(
         max_missing_seconds=config.tracking.max_missing_seconds,
@@ -124,6 +160,16 @@ def build_visits_from_video(
             timestamp_seconds=frame_data['timestamp_seconds'],
             tracks_in_zone=tracks_in_zone,
         )
+
+        processed_frames += 1
+
+        if progress_callback is not None:
+            progress_callback(
+                processed_frames,
+                total_frames,
+                frame_data['frame_index'],
+                frame_data['timestamp_seconds'],
+            )
 
     visits = visits_builder.finish_all()
 

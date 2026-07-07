@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from tqdm import tqdm
 
 from pechvision.config.loader import load_config
 from pechvision.db.models import ProcessingRun
@@ -230,6 +231,30 @@ def process_video_command(
 
     session = session_factory()
     processing_run_id = None
+    progress_bar = None
+
+    def update_progress(
+        processed_frames: int,
+        total_frames: int | None,
+        frame_index: int,
+        timestamp_seconds: float | None,
+    ) -> None:
+        nonlocal progress_bar
+
+        if progress_bar is None:
+            progress_bar = tqdm(
+                total=total_frames,
+                desc='Processing video',
+                unit='frame',
+            )
+
+        progress_bar.update(1)
+
+        if timestamp_seconds is not None:
+            progress_bar.set_postfix(
+                frame=frame_index,
+                video_time=f'{timestamp_seconds:.1f}s',
+            )
 
     try:
         video, video_created = register_video(
@@ -250,12 +275,17 @@ def process_video_command(
         processing_run.started_at = datetime.now(UTC)
         session.commit()
 
-        visits = build_visits_from_video(
-            config=config,
-            video_path=video_path,
-            start_frame=start_frame,
-            limit=limit,
-        )
+        try:
+            visits = build_visits_from_video(
+                config=config,
+                video_path=video_path,
+                start_frame=start_frame,
+                limit=limit,
+                progress_callback=update_progress,
+            )
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
         save_stats = save_visits(
             session=session,
@@ -265,10 +295,10 @@ def process_video_command(
         )
 
         finished_run = session.get(ProcessingRun, processing_run_id)
-        
+
         if finished_run is None:
             raise click.ClickException(f'Processing run не найден: {processing_run_id}')
-        
+
         finished_run.status = 'finished'
         finished_run.finished_at = datetime.now(UTC)
         finished_run.stats = {
@@ -282,6 +312,9 @@ def process_video_command(
 
     except Exception as exc:
         session.rollback()
+
+        if progress_bar is not None:
+            progress_bar.close()
 
         if processing_run_id is not None:
             failed_run = session.get(ProcessingRun, processing_run_id)
