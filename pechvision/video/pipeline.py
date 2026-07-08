@@ -3,6 +3,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pechvision.config.schema import AppConfig
 from pechvision.video.frames import iter_video_frames_range, read_video_frame
@@ -13,6 +14,20 @@ from pechvision.vision.faces import detect_faces_for_tracks
 from pechvision.vision.tracker import track_people
 from pechvision.vision.visits_builder import VisitsBuilder
 from pechvision.vision.zone import filter_detections_in_zone
+
+
+def apply_project_timezone(
+    parsed_datetime: datetime | None,
+    timezone_name: str,
+) -> datetime | None:
+    '''Принятие timezone проекта'''
+
+    if parsed_datetime is None:
+        return None
+    
+    if parsed_datetime.tzinfo is not None:
+        return parsed_datetime
+    return parsed_datetime.replace(tzinfo=ZoneInfo(timezone_name))
 
 
 def recognize_ocr_time_for_frame(
@@ -32,6 +47,11 @@ def recognize_ocr_time_for_frame(
         crop_config=config.ocr.crop
     )
     text, parsed_datetime = recognize_datetime_from_crop(crop, config.ocr)
+
+    parsed_datetime = apply_project_timezone(
+        parsed_datetime=parsed_datetime,
+        timezone_name=config.project.timezone,
+    )
 
     return text, parsed_datetime
 

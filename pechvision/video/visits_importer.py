@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from pechvision.db.models import Face, Visit
+from pechvision.identity.person_matcher import get_or_create_person_for_face
 
 
 def build_best_face_extra_data(best_face: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -63,35 +64,66 @@ def build_visit_extra_data(visit: dict[str, Any]) -> dict[str, Any]:
 
 def save_best_face_for_visit(
     session: Session,
-    visit_id: int,
+    db_visit: Visit,
     track_id: str,
     best_face: dict[str, Any] | None,
     faces_dir: str | Path | None,
-) -> bool:
+    recognition_threshold: float,
+) -> dict[str, int]:
     '''Сохраняет лучший face crop визита в файл и таблицу faces.'''
 
     if not best_face or faces_dir is None:
-        return False
+        return {
+            'faces_created': 0,
+            'persons_created': 0,
+            'persons_matched': 0,
+        }
 
     face_crop_rgb = best_face.get('face_crop')
 
     if face_crop_rgb is None:
-        return False
+        return {
+            'faces_created': 0,
+            'persons_created': 0,
+            'persons_matched': 0,
+        }
 
     output_dir = Path(faces_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     frame_index = best_face.get('frame_index')
-    output_path = output_dir / f'visit_{visit_id}_track_{track_id}_face.jpg'
+    output_path = output_dir / f'visit_{db_visit.id}_track_{track_id}_face.jpg'
     face_crop_bgr = cv2.cvtColor(face_crop_rgb, cv2.COLOR_RGB2BGR)
     saved = cv2.imwrite(str(output_path), face_crop_bgr)
 
     if not saved:
-        return False
+        return {
+            'faces_created': 0,
+            'persons_created': 0,
+            'persons_matched': 0,
+        }
+    
+    embedding = best_face.get('embedding')
+    seen_at = db_visit.entered_at or db_visit.ocr_entered_at
+
+    person, person_created, person_similarity = get_or_create_person_for_face(
+        session=session,
+        embedding=embedding,
+        face_image_path=str(output_path),
+        seen_at=seen_at,
+        threshold=recognition_threshold,
+    )
+
+    if person is not None:
+        db_visit.person_id = person.id
+
+    face_extra_data = build_best_face_extra_data(best_face) or {}
+    face_extra_data['person_created'] = person_created
+    face_extra_data['person_similarity'] = person_similarity
 
     db_face = Face(
-        person_id=None,
-        visit_id=visit_id,
+        person_id=person.id if person is not None else None,
+        visit_id=db_visit.id,
         image_path=str(output_path),
         frame_index=frame_index,
         quality_score=best_face.get('quality_score'),
@@ -101,12 +133,16 @@ def save_best_face_for_visit(
         age_estimate=best_face.get('age_estimate'),
         age_bucket=None,
         is_best=True,
-        extra_data=build_best_face_extra_data(best_face),
+        extra_data=face_extra_data,
     )
 
     session.add(db_face)
 
-    return True
+    return {
+        'faces_created': 1,
+        'persons_created': 1 if person_created else 0,
+        'persons_matched': 1 if person is not None and not person_created else 0,
+    }
 
 
 def save_visits(
@@ -114,6 +150,7 @@ def save_visits(
     video_id: int,
     processing_run_id: int,
     visits: list[dict[str, Any]],
+    recognition_threshold: float,
     faces_dir: str | Path | None = None,
 ) -> dict[str, int]:
     '''Запись запуска обработки видео и визитов в БД'''
@@ -123,12 +160,16 @@ def save_visits(
             'total': 0,
             'created': 0,
             'faces_created': 0,
-            'skipped_existing': 0
+            'skipped_existing': 0,
+            'persons_created': 0,
+            'persons_matched': 0,
         }
     
     created = 0
     faces_created = 0
     skipped_existing = 0
+    persons_created = 0
+    persons_matched = 0
 
     for visit in visits:
         ocr_entered_at = visit.get('ocr_entered_at')
@@ -168,18 +209,19 @@ def save_visits(
         session.add(db_visit)
         session.flush()
 
-        face_created = save_best_face_for_visit(
+        face_stats = save_best_face_for_visit(
             session=session,
-            visit_id=db_visit.id,
+            db_visit=db_visit,
             track_id=track_id,
             best_face=visit.get('best_face'),
             faces_dir=faces_dir,
+            recognition_threshold=recognition_threshold,
         )
 
-        if face_created:
-            faces_created += 1
-
         created += 1
+        faces_created += face_stats['faces_created']
+        persons_created += face_stats['persons_created']
+        persons_matched += face_stats['persons_matched']
 
     session.commit()
 
@@ -187,5 +229,7 @@ def save_visits(
         'total': len(visits),
         'created': created,
         'faces_created': faces_created,
+        'persons_created': persons_created,
+        'persons_matched': persons_matched,
         'skipped_existing': skipped_existing
     }

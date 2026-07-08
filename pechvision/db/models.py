@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
+from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     Boolean,
     Date,
@@ -170,7 +171,7 @@ class Person(TimestampMixin, Base):
         nullable=True
     )
     face_embedding: Mapped[list[float] | None] = mapped_column(
-        JSONB,
+        VECTOR(512),
         nullable=True
     )
 
@@ -317,7 +318,7 @@ class Face(TimestampMixin, Base):
         nullable=True
     )
     embedding: Mapped[list[float] | None] = mapped_column(
-        JSONB,
+        VECTOR(512),
         nullable=True
     )
 
@@ -482,7 +483,7 @@ class Staff(TimestampMixin, Base):
     )
 
     face_embedding: Mapped[list[float] | None] = mapped_column(
-        JSONB,
+        VECTOR(512),
         nullable=True
     )
 

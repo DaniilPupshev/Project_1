@@ -295,6 +295,7 @@ def process_video_command(
             processing_run_id=processing_run_id,
             visits=visits,
             faces_dir=config.paths.faces_dir,
+            recognition_threshold=config.faces.recognition_threshold,
         )
 
         finished_run = session.get(ProcessingRun, processing_run_id)
@@ -307,11 +308,13 @@ def process_video_command(
         finished_run.stats = {
             'start_frame': start_frame,
             'limit': limit,
+            'video_created': video_created,
             'visits_found': len(visits),
             'visits_created': save_stats['created'],
-            'faces_created': save_stats['faces_created'],
-            'video_created': video_created,
             'visits_skipped_existing': save_stats['skipped_existing'],
+            'faces_created': save_stats['faces_created'],
+            'persons_created': save_stats['persons_created'],
+            'persons_matched': save_stats['persons_matched'],
         }
         session.commit()
 
@@ -345,6 +348,8 @@ def process_video_command(
     click.echo(f'Visits created: {save_stats["created"]}')
     click.echo(f'Visits skipped existing: {save_stats["skipped_existing"]}')
     click.echo(f'Faces created: {save_stats["faces_created"]}')
+    click.echo(f'Persons created: {save_stats["persons_created"]}')
+    click.echo(f'Persons matched: {save_stats["persons_matched"]}')
     click.echo(f'Video created: {video_created}')
 
 
