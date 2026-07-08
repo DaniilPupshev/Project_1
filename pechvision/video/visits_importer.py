@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from pechvision.db.models import Face, Visit
@@ -31,6 +32,16 @@ def build_best_face_extra_data(best_face: dict[str, Any] | None) -> dict[str, An
         'gender': best_face.get('gender'),
         'age_estimate': best_face.get('age_estimate'),
     }
+
+
+def build_visit_event_key(video_id: int, visit: dict[str, Any]) -> str:
+    '''Создание event_key для визитов'''
+
+    track_id = visit['track_id']
+    entry_frame_index = visit.get('entry_frame_index')
+    exit_frame_index = visit.get('exit_frame_index')
+
+    return f'video:{video_id}:track:{track_id}:entry:{entry_frame_index}:exit:{exit_frame_index}'
 
 
 def build_visit_extra_data(visit: dict[str, Any]) -> dict[str, Any]:
@@ -112,17 +123,30 @@ def save_visits(
             'total': 0,
             'created': 0,
             'faces_created': 0,
+            'skipped_existing': 0
         }
     
     created = 0
     faces_created = 0
+    skipped_existing = 0
 
     for visit in visits:
         ocr_entered_at = visit.get('ocr_entered_at')
         track_id = f'{video_id}_{visit["track_id"]}'
 
+        event_key = build_visit_event_key(video_id, visit)
+
+        existing_visit = session.scalar(
+            select(Visit).where(Visit.event_key == event_key)
+        )
+
+        if existing_visit is not None:
+            skipped_existing += 1
+            continue
+
         db_visit = Visit(
             video_id=video_id,
+            event_key=event_key,
             processing_run_id=processing_run_id,
             person_id=None,
             track_id=track_id,
@@ -163,4 +187,5 @@ def save_visits(
         'total': len(visits),
         'created': created,
         'faces_created': faces_created,
+        'skipped_existing': skipped_existing
     }

@@ -1,7 +1,18 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -178,7 +189,16 @@ class Visit(TimestampMixin, Base):
 
     __tablename__ = 'visits'
 
+    __table_args__ = (
+        UniqueConstraint('event_key', name='uq_visits_event_key'),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
+
+    event_key: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
 
     video_id: Mapped[int] = mapped_column(
         ForeignKey('videos.id'),

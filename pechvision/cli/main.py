@@ -311,6 +311,7 @@ def process_video_command(
             'visits_created': save_stats['created'],
             'faces_created': save_stats['faces_created'],
             'video_created': video_created,
+            'visits_skipped_existing': save_stats['skipped_existing'],
         }
         session.commit()
 
@@ -342,6 +343,7 @@ def process_video_command(
     click.echo(f'Limit: {limit}')
     click.echo(f'Visits found: {len(visits)}')
     click.echo(f'Visits created: {save_stats["created"]}')
+    click.echo(f'Visits skipped existing: {save_stats["skipped_existing"]}')
     click.echo(f'Faces created: {save_stats["faces_created"]}')
     click.echo(f'Video created: {video_created}')
 
