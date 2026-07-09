@@ -46,7 +46,8 @@ def create_person_from_face(
     embedding: list[float],
     face_image_path: str | None,
     seen_at: datetime | None,
-    similarity_threshold: float
+    similarity_threshold: float,
+    face_quality_score: float | None
 ) -> Person:
     '''Создание person по face'''
 
@@ -61,6 +62,7 @@ def create_person_from_face(
         extra_data={
             'created_from': 'face_embedding',
             'similarity_threshold': similarity_threshold,
+            'best_face_quality_score': face_quality_score
         }
     )
 
@@ -69,17 +71,42 @@ def create_person_from_face(
     return person
 
 
+def update_person_best_face_if_better(
+    person: Person,
+    embedding: list[float] | None,
+    face_image_path: str | None,
+    face_quality_score: float | None
+) -> bool:
+    '''Обновление лучшего face'''
+
+    if embedding is None or face_image_path is None or face_quality_score is None:
+        return False
+
+    extra_data = person.extra_data or {}
+    current_score = extra_data.get('best_face_quality_score')
+
+    if current_score is None or face_quality_score > current_score:
+        person.best_face_path = face_image_path
+        person.face_embedding = embedding
+        extra_data['best_face_quality_score'] = face_quality_score
+        person.extra_data = extra_data
+        return True
+
+    return False
+
+
 def get_or_create_person_for_face(
     session: Session,
     embedding: list[float] | None,
     face_image_path: str | None,
     seen_at: datetime | None,
-    threshold: float
-) -> tuple[Person | None, bool, float | None]:
+    threshold: float,
+    face_quality_score: float | None
+) -> tuple[Person | None, bool, float | None, bool]:
     '''Определяет создание/изменение person'''
 
     if embedding is None or embedding == []:
-        return (None, False, None)
+        return (None, False, None, False)
     
     person, similarity = find_matching_person(
         session=session,
@@ -88,19 +115,27 @@ def get_or_create_person_for_face(
     )
 
     if person is not None:
+        best_face_updated = update_person_best_face_if_better(
+            person=person,
+            embedding=embedding,
+            face_image_path=face_image_path,
+            face_quality_score=face_quality_score
+        )
+
         if seen_at is not None and (
             person.last_seen_at is None or seen_at > person.last_seen_at
         ):
             person.last_seen_at = seen_at
 
-        return (person, False, similarity)
+        return (person, False, similarity, best_face_updated)
     
     person = create_person_from_face(
         session=session,
         embedding=embedding,
         face_image_path=face_image_path,
         seen_at=seen_at,
-        similarity_threshold=threshold
+        similarity_threshold=threshold,
+        face_quality_score=face_quality_score
     )
 
-    return (person, True, similarity)
+    return (person, True, similarity, False)

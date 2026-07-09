@@ -77,6 +77,7 @@ def save_best_face_for_visit(
             'faces_created': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_best_face_updated': 0,
         }
 
     face_crop_rgb = best_face.get('face_crop')
@@ -86,6 +87,7 @@ def save_best_face_for_visit(
             'faces_created': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_best_face_updated': 0,
         }
 
     output_dir = Path(faces_dir)
@@ -101,17 +103,21 @@ def save_best_face_for_visit(
             'faces_created': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_best_face_updated': 0,
         }
     
     embedding = best_face.get('embedding')
     seen_at = db_visit.entered_at or db_visit.ocr_entered_at
 
-    person, person_created, person_similarity = get_or_create_person_for_face(
+    face_quality_score = best_face.get('quality_score')
+
+    person, person_created, person_similarity, best_face_updated = get_or_create_person_for_face(
         session=session,
         embedding=embedding,
         face_image_path=str(output_path),
         seen_at=seen_at,
         threshold=recognition_threshold,
+        face_quality_score=face_quality_score
     )
 
     if person is not None:
@@ -120,6 +126,7 @@ def save_best_face_for_visit(
     face_extra_data = build_best_face_extra_data(best_face) or {}
     face_extra_data['person_created'] = person_created
     face_extra_data['person_similarity'] = person_similarity
+    face_extra_data['person_best_face_updated'] = best_face_updated
 
     db_face = Face(
         person_id=person.id if person is not None else None,
@@ -142,6 +149,7 @@ def save_best_face_for_visit(
         'faces_created': 1,
         'persons_created': 1 if person_created else 0,
         'persons_matched': 1 if person is not None and not person_created else 0,
+        'persons_best_face_updated': 1 if best_face_updated else 0,
     }
 
 
@@ -163,6 +171,7 @@ def save_visits(
             'skipped_existing': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_best_face_updated': 0,
         }
     
     created = 0
@@ -170,6 +179,7 @@ def save_visits(
     skipped_existing = 0
     persons_created = 0
     persons_matched = 0
+    persons_best_face_updated = 0
 
     for visit in visits:
         ocr_entered_at = visit.get('ocr_entered_at')
@@ -219,6 +229,7 @@ def save_visits(
         )
 
         created += 1
+        persons_best_face_updated += face_stats['persons_best_face_updated']
         faces_created += face_stats['faces_created']
         persons_created += face_stats['persons_created']
         persons_matched += face_stats['persons_matched']
@@ -231,5 +242,6 @@ def save_visits(
         'faces_created': faces_created,
         'persons_created': persons_created,
         'persons_matched': persons_matched,
-        'skipped_existing': skipped_existing
+        'skipped_existing': skipped_existing,
+        'persons_best_face_updated': persons_best_face_updated
     }

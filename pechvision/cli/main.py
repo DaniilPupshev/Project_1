@@ -315,6 +315,7 @@ def process_video_command(
             'faces_created': save_stats['faces_created'],
             'persons_created': save_stats['persons_created'],
             'persons_matched': save_stats['persons_matched'],
+            'persons_best_face_updated': save_stats['persons_best_face_updated']
         }
         session.commit()
 
@@ -350,6 +351,7 @@ def process_video_command(
     click.echo(f'Faces created: {save_stats["faces_created"]}')
     click.echo(f'Persons created: {save_stats["persons_created"]}')
     click.echo(f'Persons matched: {save_stats["persons_matched"]}')
+    click.echo(f'Persons best face updated: {save_stats["persons_best_face_updated"]}')
     click.echo(f'Video created: {video_created}')
 
 
