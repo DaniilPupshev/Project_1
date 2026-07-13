@@ -10,6 +10,7 @@ from tqdm import tqdm
 from pechvision.config.loader import load_config
 from pechvision.db.models import ProcessingRun
 from pechvision.db.session import make_engine, make_session_factory
+from pechvision.matching.receipt_matcher import match_receipts_to_visits
 from pechvision.receipts.importer import import_receipts
 from pechvision.video.frames import iter_video_frames, iter_video_frames_range, read_video_frame
 from pechvision.video.metadata import read_video_metadata
@@ -391,6 +392,50 @@ def run_mvp_command(
         start_frame=start_frame,
         limit=limit,
     )
+
+
+@cli.command('match-receipts')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--video-id',
+    type=int,
+    default=None,
+    help='ID видео. Если не задано, сопоставляются визиты по всем видео',
+)
+def match_receipts_command(config_path: str, video_id: int | None) -> None:
+    '''
+    Сопоставление визитов с чеками;
+    [Arg]: config_path, video_id
+    '''
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+
+    session = session_factory()
+
+    try:
+        stats = match_receipts_to_visits(
+            session=session,
+            config=config,
+            video_id=video_id,
+        )
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(f'Ошибка сопоставления чеков: {exc}') from exc
+    finally:
+        session.close()
+
+    video_label = video_id if video_id is not None else 'all'
+
+    click.echo('RECEIPT MATCHING FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Video ID: {video_label}')
+    click.echo(f'Visits checked: {stats["visits_checked"]}')
+    click.echo(f'Matches created: {stats["matches_created"]}')
+    click.echo(f'Matches skipped existing: {stats["matches_skipped_existing"]}')
+    click.echo(f'Visits without receipt: {stats["visits_without_receipt"]}')
+    click.echo(f'Ambiguous matches: {stats["ambiguous_matches"]}')
 
 
 @cli.command('video-frames-check')
