@@ -42,6 +42,7 @@ class OCRConfig(BaseModel):
     crop: CropConfig
     read_on_events_only: bool
     max_interpolation_gap_seconds: PositiveInt
+    event_frame_search_seconds: int = Field(default=3, ge=0)
 
 
 class CashierZoneConfig(BaseModel):

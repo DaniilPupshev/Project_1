@@ -129,11 +129,11 @@ def is_face_position_valid(
     )
 
     if not center_is_inside_person:
-        return True
+        return False
 
     relative_face_center_y = (face_center_y - person_y1) / person_height
 
-    return relative_face_center_y >= 0.12
+    return 0.03 <= relative_face_center_y <= 0.65
 
 
 def calculate_face_quality(face_crop: np.ndarray | None) -> float:

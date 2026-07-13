@@ -52,6 +52,14 @@ def build_visit_extra_data(visit: dict[str, Any]) -> dict[str, Any]:
         'source_track_id': visit.get('track_id'),
         'ocr_entry_text': visit.get('ocr_entry_text'),
         'ocr_exit_text': visit.get('ocr_exit_text'),
+        'ocr_entry_frame_index': visit.get('ocr_entry_frame_index'),
+        'ocr_exit_frame_index': visit.get('ocr_exit_frame_index'),
+        'ocr_entry_candidates_count': visit.get('ocr_entry_candidates_count'),
+        'ocr_exit_candidates_count': visit.get('ocr_exit_candidates_count'),
+        'ocr_duration_difference_seconds': visit.get(
+            'ocr_duration_difference_seconds'
+        ),
+        'ocr_rejection_reason': visit.get('ocr_rejection_reason'),
         'entry_timestamp_seconds': visit.get('entry_timestamp_seconds'),
         'exit_timestamp_seconds': visit.get('exit_timestamp_seconds'),
         'observations_count': visit.get('observations_count'),
@@ -182,7 +190,8 @@ def save_visits(
     persons_best_face_updated = 0
 
     for visit in visits:
-        ocr_entered_at = visit.get('ocr_entered_at')
+        entered_at = visit.get('entered_at') or visit.get('ocr_entered_at')
+        left_at = visit.get('left_at') or visit.get('ocr_left_at')
         track_id = f'{video_id}_{visit["track_id"]}'
 
         event_key = build_visit_event_key(video_id, visit)
@@ -201,13 +210,13 @@ def save_visits(
             processing_run_id=processing_run_id,
             person_id=None,
             track_id=track_id,
-            visit_date=ocr_entered_at.date() if ocr_entered_at else None,
-            entered_at=ocr_entered_at,
-            left_at=visit.get('ocr_left_at'),
+            visit_date=entered_at.date() if entered_at else left_at.date() if left_at else None,
+            entered_at=entered_at,
+            left_at=left_at,
             duration_seconds=visit.get('duration_seconds'),
             entry_frame_index=visit.get('entry_frame_index'),
             exit_frame_index=visit.get('exit_frame_index'),
-            ocr_entered_at=ocr_entered_at,
+            ocr_entered_at=visit.get('ocr_entered_at'),
             ocr_left_at=visit.get('ocr_left_at'),
             time_is_estimated=visit.get('time_is_estimated', True),
             is_staff=False,
