@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from time import monotonic
 
 import click
 import cv2
@@ -234,30 +235,91 @@ def process_video_command(
 
     session = session_factory()
     processing_run_id = None
-    progress_bar = None
+    progress_bar = tqdm(
+        total=100.0,
+        desc='PechVision: preparing',
+        unit='%',
+        bar_format='{desc}: {percentage:6.2f}%|{bar}| {elapsed}<{remaining}',
+    )
+
+    stage_ranges = {
+        'registration': (0.0, 1.0),
+        'video': (1.0, 93.0),
+        'ocr': (93.0, 99.0),
+        'save': (99.0, 99.8),
+        'completed': (99.8, 100.0),
+    }
+    stage_labels = {
+        'registration': 'PechVision: registration',
+        'video': 'PechVision: video analysis',
+        'ocr': 'PechVision: OCR',
+        'save': 'PechVision: saving results',
+        'completed': 'PechVision: completed',
+    }
+    current_progress_stage = None
+    video_progress_started_at = None
 
     def update_progress(
-        processed_frames: int,
-        total_frames: int | None,
-        frame_index: int,
-        timestamp_seconds: float | None,
+        stage: str,
+        completed: int,
+        total: int | None,
+        details: dict | None,
     ) -> None:
-        nonlocal progress_bar
+        nonlocal current_progress_stage, video_progress_started_at
 
-        if progress_bar is None:
-            progress_bar = tqdm(
-                total=total_frames,
-                desc='Processing video',
-                unit='frame',
-            )
+        stage_range = stage_ranges.get(stage)
 
-        progress_bar.update(1)
+        if stage_range is None:
+            return
 
-        if timestamp_seconds is not None:
+        start_percent, end_percent = stage_range
+        ratio = 0.0 if total is None else 1.0 if total <= 0 else completed / total
+        ratio = min(1.0, max(0.0, ratio))
+        target_percent = start_percent + (end_percent - start_percent) * ratio
+        progress_delta = target_percent - progress_bar.n
+
+        if progress_delta > 0:
+            progress_bar.update(progress_delta)
+
+        if stage != current_progress_stage:
+            progress_bar.set_description(stage_labels[stage], refresh=False)
+            current_progress_stage = stage
+
+            if stage == 'video':
+                video_progress_started_at = monotonic()
+
+        should_refresh_details = (
+            stage != 'video'
+            or completed % 100 == 0
+            or total is not None and completed >= total
+        )
+
+        if not should_refresh_details:
+            return
+
+        if stage == 'video' and details is not None:
+            timestamp_seconds = details.get('timestamp_seconds')
+            postfix = {'frame': details.get('frame_index')}
+
+            if video_progress_started_at is not None:
+                elapsed_seconds = monotonic() - video_progress_started_at
+
+                if elapsed_seconds > 0:
+                    postfix['speed'] = f'{completed / elapsed_seconds:.1f} frame/s'
+
+            if timestamp_seconds is not None:
+                postfix['video_time'] = f'{timestamp_seconds:.1f}s'
+
+            progress_bar.set_postfix(postfix)
+        elif stage == 'ocr' and details is not None:
             progress_bar.set_postfix(
-                frame=frame_index,
-                video_time=f'{timestamp_seconds:.1f}s',
+                visits=f'{completed}/{total}',
+                cached_frames=details.get('cached_frames'),
             )
+        elif stage == 'save':
+            progress_bar.set_postfix(visits=f'{completed}/{total}')
+        elif stage == 'completed':
+            progress_bar.set_postfix()
 
     try:
         video, video_created = register_video(
@@ -277,18 +339,15 @@ def process_video_command(
         processing_run.status = 'running'
         processing_run.started_at = datetime.now(UTC)
         session.commit()
+        update_progress('registration', 1, 1, None)
 
-        try:
-            visits = build_visits_from_video(
-                config=config,
-                video_path=video_path,
-                start_frame=start_frame,
-                limit=limit,
-                progress_callback=update_progress,
-            )
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
+        visits = build_visits_from_video(
+            config=config,
+            video_path=video_path,
+            start_frame=start_frame,
+            limit=limit,
+            progress_callback=update_progress,
+        )
 
         save_stats = save_visits(
             session=session,
@@ -297,6 +356,7 @@ def process_video_command(
             visits=visits,
             faces_dir=config.paths.faces_dir,
             recognition_threshold=config.faces.recognition_threshold,
+            progress_callback=update_progress,
         )
 
         finished_run = session.get(ProcessingRun, processing_run_id)
@@ -319,12 +379,11 @@ def process_video_command(
             'persons_best_face_updated': save_stats['persons_best_face_updated']
         }
         session.commit()
+        update_progress('completed', 1, 1, None)
 
     except Exception as exc:
         session.rollback()
-
-        if progress_bar is not None:
-            progress_bar.close()
+        progress_bar.set_description('PechVision: failed')
 
         if processing_run_id is not None:
             failed_run = session.get(ProcessingRun, processing_run_id)
@@ -337,6 +396,7 @@ def process_video_command(
         raise click.ClickException(f'Ошибка обработки видео: {exc}') from exc
 
     finally:
+        progress_bar.close()
         session.close()
 
     click.echo('VIDEO PROCESSING FINISHED')

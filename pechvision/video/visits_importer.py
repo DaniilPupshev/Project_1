@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -168,10 +169,16 @@ def save_visits(
     visits: list[dict[str, Any]],
     recognition_threshold: float,
     faces_dir: str | Path | None = None,
+    progress_callback: (
+        Callable[[str, int, int | None, dict[str, Any] | None], None] | None
+    ) = None,
 ) -> dict[str, int]:
     '''Запись запуска обработки видео и визитов в БД'''
 
     if not visits:
+        if progress_callback is not None:
+            progress_callback('save', 1, 1, None)
+
         return {
             'total': 0,
             'created': 0,
@@ -189,7 +196,9 @@ def save_visits(
     persons_matched = 0
     persons_best_face_updated = 0
 
-    for visit in visits:
+    total_visits = len(visits)
+
+    for visit_index, visit in enumerate(visits, start=1):
         entered_at = visit.get('entered_at') or visit.get('ocr_entered_at')
         left_at = visit.get('left_at') or visit.get('ocr_left_at')
         track_id = f'{video_id}_{visit["track_id"]}'
@@ -202,6 +211,15 @@ def save_visits(
 
         if existing_visit is not None:
             skipped_existing += 1
+
+            if progress_callback is not None:
+                progress_callback(
+                    'save',
+                    visit_index,
+                    total_visits,
+                    {'visit_id': existing_visit.id, 'skipped': True},
+                )
+
             continue
 
         db_visit = Visit(
@@ -242,6 +260,14 @@ def save_visits(
         faces_created += face_stats['faces_created']
         persons_created += face_stats['persons_created']
         persons_matched += face_stats['persons_matched']
+
+        if progress_callback is not None:
+            progress_callback(
+                'save',
+                visit_index,
+                total_visits,
+                {'visit_id': db_visit.id, 'skipped': False},
+            )
 
     session.commit()
 

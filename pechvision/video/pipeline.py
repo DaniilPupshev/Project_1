@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import cv2
+
 from pechvision.config.schema import AppConfig
 from pechvision.video.frames import iter_video_frames_range, read_video_frame
 from pechvision.video.metadata import read_video_metadata
@@ -14,6 +16,11 @@ from pechvision.vision.faces import detect_faces_for_tracks
 from pechvision.vision.tracker import track_people
 from pechvision.vision.visits_builder import VisitsBuilder
 from pechvision.vision.zone import filter_detections_in_zone
+
+ProgressCallback = Callable[
+    [str, int, int | None, dict[str, Any] | None],
+    None,
+]
 
 
 def apply_project_timezone(
@@ -33,27 +40,52 @@ def apply_project_timezone(
 def recognize_ocr_time_for_frame(
     video_path: str | Path,
     frame_index: int,
-    config: AppConfig
+    config: AppConfig,
+    capture: cv2.VideoCapture | None = None,
+    ocr_cache: dict[int, tuple[str, datetime | None]] | None = None,
 ) -> tuple[str, datetime | None]:
-    '''Распознавание OCR-времени для одного кадра'''
+    '''Распознает OCR-время кадра с поддержкой capture и кэша.'''
 
-    frame = read_video_frame(
-        path=video_path,
-        frame_index=frame_index
-    )
+    if ocr_cache is not None and frame_index in ocr_cache:
+        return ocr_cache[frame_index]
+
+    if capture is None:
+        frame = read_video_frame(
+            path=video_path,
+            frame_index=frame_index,
+        )
+    else:
+        if not capture.isOpened():
+            raise RuntimeError(f'Видео закрыто или недоступно: {video_path}')
+
+        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = capture.read()
+
+        if not success:
+            raise RuntimeError(
+                f'Не удалось прочитать кадр {frame_index}: {video_path}'
+            )
 
     crop = crop_frame(
         frame=frame,
-        crop_config=config.ocr.crop
+        crop_config=config.ocr.crop,
     )
-    text, parsed_datetime = recognize_datetime_from_crop(crop, config.ocr)
+    text, parsed_datetime = recognize_datetime_from_crop(
+        crop,
+        config.ocr,
+    )
 
     parsed_datetime = apply_project_timezone(
         parsed_datetime=parsed_datetime,
         timezone_name=config.project.timezone,
     )
 
-    return text, parsed_datetime
+    result = text, parsed_datetime
+
+    if ocr_cache is not None:
+        ocr_cache[frame_index] = result
+
+    return result
 
 
 def build_ocr_search_frame_indices(
@@ -89,6 +121,8 @@ def recognize_ocr_time_candidates_near_frame(
     target_frame_index: int,
     config: AppConfig,
     metadata: dict[str, Any],
+    capture: cv2.VideoCapture | None = None,
+    ocr_cache: dict[int, tuple[str, datetime | None]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     '''Собирает OCR-кандидатов на заданном и соседних кадрах.'''
 
@@ -111,6 +145,8 @@ def recognize_ocr_time_candidates_near_frame(
                 video_path=video_path,
                 frame_index=frame_index,
                 config=config,
+                capture=capture,
+                ocr_cache=ocr_cache
             )
         except RuntimeError:
             continue
@@ -334,6 +370,8 @@ def enrich_visit_with_ocr_time(
     video_path: str | Path,
     config: AppConfig,
     metadata: dict[str, Any],
+    capture: cv2.VideoCapture | None = None,
+    ocr_cache: dict[int, tuple[str, datetime | None]] | None = None,
 ) -> dict[str, Any]:
     '''Добавление к визиту OCR-времени входа/выхода'''
 
@@ -345,12 +383,16 @@ def enrich_visit_with_ocr_time(
         target_frame_index=entry_frame_index,
         config=config,
         metadata=metadata,
+        capture=capture,
+        ocr_cache=ocr_cache
     )
     exit_target_text, exit_candidates = recognize_ocr_time_candidates_near_frame(
         video_path=video_path,
         target_frame_index=exit_frame_index,
         config=config,
         metadata=metadata,
+        capture=capture,
+        ocr_cache=ocr_cache
     )
 
     entry_candidate, exit_candidate, ocr_duration_difference_seconds = (
@@ -572,7 +614,7 @@ def build_visits_from_video(
     video_path: str | Path,
     start_frame: int = 0,
     limit: int | None = None,
-    progress_callback: Callable[[int, int | None, int, float | None], None] | None = None
+    progress_callback: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
     '''Строит визиты по видео и определяет OCR-время'''
 
@@ -633,22 +675,53 @@ def build_visits_from_video(
 
         if progress_callback is not None:
             progress_callback(
+                'video',
                 processed_frames,
                 total_frames,
-                frame_data['frame_index'],
-                frame_data['timestamp_seconds'],
+                {
+                    'frame_index': frame_data['frame_index'],
+                    'timestamp_seconds': frame_data['timestamp_seconds'],
+                },
             )
 
     visits = visits_builder.finish_all()
 
-    enriched_visits = [
-        enrich_visit_with_ocr_time(
-            visit=visit,
-            video_path=video_path,
-            config=config,
-            metadata=metadata,
-        )
-        for visit in visits
-    ]
+    ocr_capture = cv2.VideoCapture(str(video_path))
+    ocr_cache: dict[int, tuple[str, datetime | None]] = {}
+
+    try:
+        if not ocr_capture.isOpened():
+            raise RuntimeError(f'Не удалось открыть видео: {video_path}')
+
+        enriched_visits = []
+        total_visits = len(visits)
+
+        if total_visits == 0 and progress_callback is not None:
+            progress_callback('ocr', 1, 1, {'cached_frames': 0})
+
+        for visit_index, visit in enumerate(visits, start=1):
+            enriched_visit = enrich_visit_with_ocr_time(
+                visit=visit,
+                video_path=video_path,
+                config=config,
+                metadata=metadata,
+                capture=ocr_capture,
+                ocr_cache=ocr_cache,
+            )
+            enriched_visits.append(enriched_visit)
+
+            if progress_callback is not None:
+                progress_callback(
+                    'ocr',
+                    visit_index,
+                    total_visits,
+                    {
+                        'track_id': visit.get('track_id'),
+                        'cached_frames': len(ocr_cache),
+                    },
+                )
+
+    finally:
+        ocr_capture.release()
 
     return validate_visits_ocr_chronology(enriched_visits)
