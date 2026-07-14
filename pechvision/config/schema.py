@@ -82,7 +82,8 @@ class DemographicsConfig(BaseModel):
 
 class CashiersConfig(BaseModel):
     enabled: bool
-    embeddings_path: Path
+    registry_path: Path
+    supported_extensions: list[str]
     similarity_threshold: float = Field(ge=0.0, le=1.0)
 
 

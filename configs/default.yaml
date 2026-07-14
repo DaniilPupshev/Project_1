@@ -31,7 +31,7 @@ paths:
   # Папка с локальными ML-моделями
   models_dir: data/models
 
-  # Папка с фото и embeddings кассиров для исключения из обработки
+  # Папка с CSV-справочником и эталонными фото кассиров
   cashiers_dir: data/cashiers
 
 
@@ -146,7 +146,6 @@ faces:
   # Если true, сохраняется лучший кадр лица для каждого визита/трека
   save_best_face: true
 
-
 demographics:
   # Включает определение пола и примерного возраста
   enabled: true
@@ -160,13 +159,20 @@ demographics:
 
 cashiers:
   # Включает исключение кассиров из посетителей
-  enabled: true
+  enabled: false
 
-  # Путь к файлу с embeddings кассиров
-  embeddings_path: data/cashiers/cashier_embeddings.json
+  # CSV-справочник сотрудников
+  registry_path: data/cashiers/name_cashiers.csv
 
-  # Порог похожести лица с кассиром для исключения
-  similarity_threshold: 0.35
+  # Поддерживаемые расширения эталонных фотографий
+  supported_extensions:
+    - .png
+    - .jpg
+    - .jpeg
+
+  # Порог похожести лица с кассиром для исключения.
+  # Перед применением к данным его нужно проверить через classify-staff без --apply
+  similarity_threshold: 0.5
 
 
 receipts:

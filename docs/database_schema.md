@@ -315,7 +315,7 @@ unknown
 | `external_staff_key` | `varchar(128)` | Нет | Внешний ключ сотрудника. |
 | `full_name` | `varchar(255)` | Нет | Имя, фамилия или внутренняя метка сотрудника. |
 | `photo_path` | `varchar(1024)` | Нет | Путь к эталонному фото. |
-| `face_embedding` | `jsonb` | Нет | Эталонный embedding лица сотрудника. |
+| `face_embedding` | `vector(512)` | Нет | Нормализованный эталонный embedding лица сотрудника для поиска по cosine distance. |
 | `is_active` | `boolean` | Да | Используется ли сотрудник при исключении из потока. |
 | `metadata` | `jsonb` | Нет | Дополнительные данные сотрудника. |
 | `created_at` | `timestamp with time zone` | Да | Когда запись создана. |

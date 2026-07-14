@@ -11,6 +11,8 @@ from tqdm import tqdm
 from pechvision.config.loader import load_config
 from pechvision.db.models import ProcessingRun
 from pechvision.db.session import make_engine, make_session_factory
+from pechvision.identity.staff_matcher import classify_existing_staff, has_active_staff
+from pechvision.identity.staff_registry import register_staff_from_registry
 from pechvision.matching.receipt_matcher import match_receipts_to_visits
 from pechvision.receipts.importer import import_receipts
 from pechvision.video.frames import iter_video_frames, iter_video_frames_range, read_video_frame
@@ -234,6 +236,15 @@ def process_video_command(
     session_factory = make_session_factory(engine)
 
     session = session_factory()
+
+    if config.cashiers.enabled and not has_active_staff(session):
+        session.close()
+        raise click.ClickException(
+            'Исключение персонала включено, но в БД нет активных сотрудников. '
+            'Сначала выполните register-staff или установите '
+            'cashiers.enabled: false для запуска без фильтрации персонала.'
+        )
+
     processing_run_id = None
     progress_bar = tqdm(
         total=100.0,
@@ -356,6 +367,8 @@ def process_video_command(
             visits=visits,
             faces_dir=config.paths.faces_dir,
             recognition_threshold=config.faces.recognition_threshold,
+            staff_matching_enabled=config.cashiers.enabled,
+            staff_similarity_threshold=config.cashiers.similarity_threshold,
             progress_callback=update_progress,
         )
 
@@ -376,7 +389,8 @@ def process_video_command(
             'faces_created': save_stats['faces_created'],
             'persons_created': save_stats['persons_created'],
             'persons_matched': save_stats['persons_matched'],
-            'persons_best_face_updated': save_stats['persons_best_face_updated']
+            'persons_best_face_updated': save_stats['persons_best_face_updated'],
+            'staff_visits_matched': save_stats['staff_visits_matched'],
         }
         session.commit()
         update_progress('completed', 1, 1, None)
@@ -413,6 +427,7 @@ def process_video_command(
     click.echo(f'Persons created: {save_stats["persons_created"]}')
     click.echo(f'Persons matched: {save_stats["persons_matched"]}')
     click.echo(f'Persons best face updated: {save_stats["persons_best_face_updated"]}')
+    click.echo(f'Staff visits matched: {save_stats["staff_visits_matched"]}')
     click.echo(f'Video created: {video_created}')
 
 
@@ -452,6 +467,119 @@ def run_mvp_command(
         start_frame=start_frame,
         limit=limit,
     )
+
+
+@cli.command('register-staff')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+def register_staff_command(config_path: str) -> None:
+    '''Регистрирует или обновляет сотрудников из CSV-справочника.'''
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+    session = session_factory()
+
+    try:
+        stats = register_staff_from_registry(
+            session=session,
+            registry_path=config.cashiers.registry_path,
+            cashiers_dir=config.paths.cashiers_dir,
+            faces_config=config.faces,
+            supported_extensions=config.cashiers.supported_extensions,
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(
+            f'Ошибка регистрации персонала: {exc}'
+        ) from exc
+    finally:
+        session.close()
+
+    click.echo('STAFF REGISTRATION FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Total: {stats["total"]}')
+    click.echo(f'Created: {stats["created"]}')
+    click.echo(f'Updated: {stats["updated"]}')
+
+
+@cli.command('classify-staff')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--video-id',
+    type=int,
+    default=None,
+    help='ID видео. Если не указан, проверяются все сохраненные лица',
+)
+@click.option(
+    '--apply',
+    'apply_changes',
+    is_flag=True,
+    help='Применить найденную классификацию. Без флага выполняется dry-run',
+)
+@click.option(
+    '--show-limit',
+    type=int,
+    default=20,
+    show_default=True,
+    help='Максимальное количество найденных совпадений в выводе',
+)
+def classify_staff_command(
+    config_path: str,
+    video_id: int | None,
+    apply_changes: bool,
+    show_limit: int,
+) -> None:
+    '''Ищет сотрудников среди уже сохраненных лиц.'''
+
+    if video_id is not None and video_id < 1:
+        raise click.ClickException('video-id должен быть >= 1')
+
+    if show_limit < 0:
+        raise click.ClickException('show-limit должен быть >= 0')
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+    session = session_factory()
+
+    try:
+        stats = classify_existing_staff(
+            session=session,
+            threshold=config.cashiers.similarity_threshold,
+            video_id=video_id,
+            apply=apply_changes,
+        )
+
+        if apply_changes:
+            session.commit()
+        else:
+            session.rollback()
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(
+            f'Ошибка классификации персонала: {exc}'
+        ) from exc
+    finally:
+        session.close()
+
+    mode = 'APPLY' if apply_changes else 'DRY-RUN'
+    click.echo(f'STAFF CLASSIFICATION {mode} FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Faces checked: {stats["faces_checked"]}')
+    click.echo(f'Matches found: {stats["matches_found"]}')
+    click.echo(f'Visits updated: {stats["visits_updated"]}')
+    click.echo(f'Orphan persons deleted: {stats["persons_deleted"]}')
+    click.echo(f'Persons rebuilt: {stats["persons_rebuilt"]}')
+
+    for match in stats['matches'][:show_limit]:
+        click.echo(
+            f'Visit {match["visit_id"]}: '
+            f'{match["external_staff_key"]} '
+            f'({match["full_name"]}), '
+            f'similarity={match["similarity"]:.3f}, '
+            f'already_classified={match["already_classified"]}'
+        )
 
 
 @cli.command('match-receipts')

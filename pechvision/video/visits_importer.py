@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from pechvision.db.models import Face, Visit
 from pechvision.identity.person_matcher import get_or_create_person_for_face
+from pechvision.identity.staff_matcher import find_matching_staff
 
 
 def build_best_face_extra_data(best_face: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -78,6 +79,8 @@ def save_best_face_for_visit(
     best_face: dict[str, Any] | None,
     faces_dir: str | Path | None,
     recognition_threshold: float,
+    staff_matching_enabled: bool = False,
+    staff_similarity_threshold: float = 1.0,
 ) -> dict[str, int]:
     '''Сохраняет лучший face crop визита в файл и таблицу faces.'''
 
@@ -87,6 +90,7 @@ def save_best_face_for_visit(
             'persons_created': 0,
             'persons_matched': 0,
             'persons_best_face_updated': 0,
+            'staff_visits_matched': 0,
         }
 
     face_crop_rgb = best_face.get('face_crop')
@@ -97,6 +101,7 @@ def save_best_face_for_visit(
             'persons_created': 0,
             'persons_matched': 0,
             'persons_best_face_updated': 0,
+            'staff_visits_matched': 0,
         }
 
     output_dir = Path(faces_dir)
@@ -113,29 +118,58 @@ def save_best_face_for_visit(
             'persons_created': 0,
             'persons_matched': 0,
             'persons_best_face_updated': 0,
+            'staff_visits_matched': 0,
         }
-    
+
     embedding = best_face.get('embedding')
     seen_at = db_visit.entered_at or db_visit.ocr_entered_at
 
     face_quality_score = best_face.get('quality_score')
+    staff_member = None
+    staff_similarity = None
 
-    person, person_created, person_similarity, best_face_updated = get_or_create_person_for_face(
-        session=session,
-        embedding=embedding,
-        face_image_path=str(output_path),
-        seen_at=seen_at,
-        threshold=recognition_threshold,
-        face_quality_score=face_quality_score
-    )
+    if staff_matching_enabled:
+        staff_member, staff_similarity = find_matching_staff(
+            session=session,
+            embedding=embedding,
+            threshold=staff_similarity_threshold,
+        )
 
-    if person is not None:
-        db_visit.person_id = person.id
+    person = None
+    person_created = False
+    person_similarity = None
+    best_face_updated = False
+
+    if staff_member is not None:
+        db_visit.is_staff = True
+        db_visit.staff_id = staff_member.id
+        db_visit.person_id = None
+    else:
+        person, person_created, person_similarity, best_face_updated = (
+            get_or_create_person_for_face(
+                session=session,
+                embedding=embedding,
+                face_image_path=str(output_path),
+                seen_at=seen_at,
+                threshold=recognition_threshold,
+                face_quality_score=face_quality_score,
+            )
+        )
+
+        if person is not None:
+            db_visit.person_id = person.id
 
     face_extra_data = build_best_face_extra_data(best_face) or {}
     face_extra_data['person_created'] = person_created
     face_extra_data['person_similarity'] = person_similarity
     face_extra_data['person_best_face_updated'] = best_face_updated
+    face_extra_data['staff_id'] = (
+        staff_member.id if staff_member is not None else None
+    )
+    face_extra_data['external_staff_key'] = (
+        staff_member.external_staff_key if staff_member is not None else None
+    )
+    face_extra_data['staff_similarity'] = staff_similarity
 
     db_face = Face(
         person_id=person.id if person is not None else None,
@@ -159,6 +193,7 @@ def save_best_face_for_visit(
         'persons_created': 1 if person_created else 0,
         'persons_matched': 1 if person is not None and not person_created else 0,
         'persons_best_face_updated': 1 if best_face_updated else 0,
+        'staff_visits_matched': 1 if staff_member is not None else 0,
     }
 
 
@@ -168,6 +203,8 @@ def save_visits(
     processing_run_id: int,
     visits: list[dict[str, Any]],
     recognition_threshold: float,
+    staff_matching_enabled: bool = False,
+    staff_similarity_threshold: float = 1.0,
     faces_dir: str | Path | None = None,
     progress_callback: (
         Callable[[str, int, int | None, dict[str, Any] | None], None] | None
@@ -187,14 +224,16 @@ def save_visits(
             'persons_created': 0,
             'persons_matched': 0,
             'persons_best_face_updated': 0,
+            'staff_visits_matched': 0,
         }
-    
+
     created = 0
     faces_created = 0
     skipped_existing = 0
     persons_created = 0
     persons_matched = 0
     persons_best_face_updated = 0
+    staff_visits_matched = 0
 
     total_visits = len(visits)
 
@@ -253,6 +292,8 @@ def save_visits(
             best_face=visit.get('best_face'),
             faces_dir=faces_dir,
             recognition_threshold=recognition_threshold,
+            staff_matching_enabled=staff_matching_enabled,
+            staff_similarity_threshold=staff_similarity_threshold,
         )
 
         created += 1
@@ -260,6 +301,7 @@ def save_visits(
         faces_created += face_stats['faces_created']
         persons_created += face_stats['persons_created']
         persons_matched += face_stats['persons_matched']
+        staff_visits_matched += face_stats['staff_visits_matched']
 
         if progress_callback is not None:
             progress_callback(
@@ -278,5 +320,6 @@ def save_visits(
         'persons_created': persons_created,
         'persons_matched': persons_matched,
         'skipped_existing': skipped_existing,
-        'persons_best_face_updated': persons_best_face_updated
+        'persons_best_face_updated': persons_best_face_updated,
+        'staff_visits_matched': staff_visits_matched,
     }
