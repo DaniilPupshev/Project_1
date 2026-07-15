@@ -157,7 +157,10 @@ def registry_videos_command(config_path: str, video_path: str) -> None:
 @cli.command('create-run')
 @click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
 @click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
-def create_run_command(config_path: str, video_path: str) -> None:
+def create_run_command(
+    config_path: str,
+    video_path: str
+) -> None:
     '''
     Создание процесса обработки
     [Arg]: config_path, video_path
@@ -177,7 +180,10 @@ def create_run_command(config_path: str, video_path: str) -> None:
         processing_run = create_processing_run(
             session=session,
             video=video,
-            config_path=config_path
+            config=config,
+            config_path=config_path,
+            start_frame=0,
+            frame_limit=None,
         )
 
         video_id = video.id
@@ -341,7 +347,10 @@ def process_video_command(
         processing_run = create_processing_run(
             session=session,
             video=video,
+            config=config,
             config_path=config_path,
+            start_frame=start_frame,
+            frame_limit=limit,
         )
 
         video_id = video.id

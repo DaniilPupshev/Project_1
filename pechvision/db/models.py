@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -133,6 +134,25 @@ class ProcessingRun(TimestampMixin, Base):
         nullable=True
     )
 
+    config_snapshot: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True
+    )
+    config_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True
+    )
+    start_frame: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0
+    )
+    frame_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True
+    )
+
     stats: Mapped[dict | None] = mapped_column(
         JSONB,
         nullable=True
@@ -149,6 +169,16 @@ class Person(TimestampMixin, Base):
     '''Таблица людей'''
 
     __tablename__ = 'persons'
+    __table_args__ = (
+        Index(
+            'ix_persons_face_embedding_hnsw',
+            'face_embedding',
+            postgresql_using='hnsw',
+            postgresql_ops={
+                'face_embedding': 'vector_cosine_ops',
+            },
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     external_person_key: Mapped[str] = mapped_column(
