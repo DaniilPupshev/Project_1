@@ -21,7 +21,10 @@ from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_cr
 from pechvision.video.pipeline import build_visits_from_video
 from pechvision.video.registry import register_video
 from pechvision.video.roi import crop_frame
-from pechvision.video.runs import create_processing_run
+from pechvision.video.runs import (
+    create_processing_run,
+    find_existing_processing_run,
+)
 from pechvision.video.visits_importer import save_visits
 from pechvision.vision.person_detector import detect_people
 from pechvision.vision.tracker import track_people
@@ -240,16 +243,51 @@ def process_video_command(
     config = load_config(config_path)
     engine = make_engine(config)
     session_factory = make_session_factory(engine)
-
     session = session_factory()
 
-    if config.cashiers.enabled and not has_active_staff(session):
+    try:
+        if config.cashiers.enabled and not has_active_staff(session):
+            raise click.ClickException(
+                'Исключение персонала включено, но в БД нет активных сотрудников. '
+                'Сначала выполните register-staff или установите '
+                'cashiers.enabled: false для запуска без фильтрации персонала.'
+            )
+
+        video, video_created = register_video(
+            session=session,
+            path=video_path,
+        )
+
+        existing_run = find_existing_processing_run(
+            session=session,
+            video_id=video.id,
+            config=config,
+            start_frame=start_frame,
+            frame_limit=limit,
+        )
+
+        if existing_run is not None:
+            if existing_run.status == 'running':
+                reason = 'Обработка с такими параметрами уже выполняется'
+            else:
+                reason = 'Видео с такими параметрами уже обработано'
+
+            raise click.ClickException(
+                f'{reason}. '
+                f'Video ID: {video.id}. '
+                f'Run ID: {existing_run.id}.'
+            )
+
+    except click.ClickException:
+        session.rollback()
+        session.close()
+        raise
+    except Exception as exc:
+        session.rollback()
         session.close()
         raise click.ClickException(
-            'Исключение персонала включено, но в БД нет активных сотрудников. '
-            'Сначала выполните register-staff или установите '
-            'cashiers.enabled: false для запуска без фильтрации персонала.'
-        )
+            f'Ошибка подготовки обработки видео: {exc}'
+        ) from exc
 
     processing_run_id = None
     progress_bar = tqdm(
@@ -328,22 +366,20 @@ def process_video_command(
                 postfix['video_time'] = f'{timestamp_seconds:.1f}s'
 
             progress_bar.set_postfix(postfix)
+
         elif stage == 'ocr' and details is not None:
             progress_bar.set_postfix(
                 visits=f'{completed}/{total}',
                 cached_frames=details.get('cached_frames'),
             )
+
         elif stage == 'save':
             progress_bar.set_postfix(visits=f'{completed}/{total}')
+
         elif stage == 'completed':
             progress_bar.set_postfix()
 
     try:
-        video, video_created = register_video(
-            session=session,
-            path=video_path,
-        )
-
         processing_run = create_processing_run(
             session=session,
             video=video,
@@ -359,6 +395,7 @@ def process_video_command(
         processing_run.status = 'running'
         processing_run.started_at = datetime.now(UTC)
         session.commit()
+
         update_progress('registration', 1, 1, None)
 
         visits = build_visits_from_video(
@@ -384,7 +421,9 @@ def process_video_command(
         finished_run = session.get(ProcessingRun, processing_run_id)
 
         if finished_run is None:
-            raise click.ClickException(f'Processing run не найден: {processing_run_id}')
+            raise RuntimeError(
+                f'Processing run не найден: {processing_run_id}'
+            )
 
         finished_run.status = 'finished'
         finished_run.finished_at = datetime.now(UTC)
@@ -398,9 +437,12 @@ def process_video_command(
             'faces_created': save_stats['faces_created'],
             'persons_created': save_stats['persons_created'],
             'persons_matched': save_stats['persons_matched'],
-            'persons_best_face_updated': save_stats['persons_best_face_updated'],
+            'persons_best_face_updated': save_stats[
+                'persons_best_face_updated'
+            ],
             'staff_visits_matched': save_stats['staff_visits_matched'],
         }
+
         session.commit()
         update_progress('completed', 1, 1, None)
 
@@ -410,13 +452,16 @@ def process_video_command(
 
         if processing_run_id is not None:
             failed_run = session.get(ProcessingRun, processing_run_id)
+
             if failed_run is not None:
                 failed_run.status = 'failed'
                 failed_run.finished_at = datetime.now(UTC)
                 failed_run.error_message = str(exc)
                 session.commit()
 
-        raise click.ClickException(f'Ошибка обработки видео: {exc}') from exc
+        raise click.ClickException(
+            f'Ошибка обработки видео: {exc}'
+        ) from exc
 
     finally:
         progress_bar.close()
@@ -435,7 +480,10 @@ def process_video_command(
     click.echo(f'Faces created: {save_stats["faces_created"]}')
     click.echo(f'Persons created: {save_stats["persons_created"]}')
     click.echo(f'Persons matched: {save_stats["persons_matched"]}')
-    click.echo(f'Persons best face updated: {save_stats["persons_best_face_updated"]}')
+    click.echo(
+        'Persons best face updated: '
+        f'{save_stats["persons_best_face_updated"]}'
+    )
     click.echo(f'Staff visits matched: {save_stats["staff_visits_matched"]}')
     click.echo(f'Video created: {video_created}')
 

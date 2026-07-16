@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -39,6 +40,12 @@ class Video(TimestampMixin, Base):
     '''Таблица обработанных видео'''
 
     __tablename__ = 'videos'
+    __table_args__ = (
+        UniqueConstraint(
+            'file_sha256',
+            name='uq_videos_file_sha256',
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_path: Mapped[str] = mapped_column(
@@ -85,6 +92,15 @@ class Video(TimestampMixin, Base):
     )
     recorded_end_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True
+    )
+
+    file_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True
+    )
+    file_size_bytes: Mapped[int | None] = mapped_column(
+        BigInteger,
         nullable=True
     )
 
