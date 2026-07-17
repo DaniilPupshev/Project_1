@@ -181,8 +181,26 @@ class VisitsBuilder:
             active_visit.best_face = candidate
             return
 
-        candidate_score = candidate.get('quality_score') or 0
-        best_score = active_visit.best_face.get('quality_score') or 0
+        candidate_is_eligible = bool(
+            candidate.get('is_identity_eligible', False)
+        )
+        best_is_eligible = bool(
+            active_visit.best_face.get('is_identity_eligible', False)
+        )
+
+        if candidate_is_eligible and not best_is_eligible:
+            active_visit.best_face = candidate
+            return
+
+        if best_is_eligible and not candidate_is_eligible:
+            return
+
+        candidate_score = float(
+            candidate.get('identity_quality_score') or 0.0
+        )
+        best_score = float(
+            active_visit.best_face.get('identity_quality_score') or 0.0
+        )
 
         if candidate_score > best_score:
             active_visit.best_face = candidate

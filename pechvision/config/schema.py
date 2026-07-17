@@ -70,6 +70,12 @@ class FacesConfig(BaseModel):
     det_threshold: float = Field(ge=0.0, le=1.0)
     recognition_threshold: float = Field(ge=0.0, le=1.0)
     min_face_size: PositiveInt
+    min_identity_sharpness: float = Field(ge=0.0)
+    min_identity_confidence: float = Field(ge=0.0, le=1.0)
+    identity_frame_margin: int = Field(ge=0)
+    max_identity_yaw: float = Field(ge=0.0, le=90.0)
+    max_identity_pitch: float = Field(ge=0.0, le=90.0)
+    max_identity_roll: float = Field(ge=0.0, le=90.0)
     search_every_processed_frames: PositiveInt
     save_best_face: bool
 

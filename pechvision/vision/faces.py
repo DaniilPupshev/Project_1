@@ -31,6 +31,29 @@ def clip_bbox_to_frame(
     return [x1, y1, x2, y2]
 
 
+def is_face_bbox_clipped(
+    bbox: list[int] | tuple[int, int, int, int],
+    frame_shape: tuple[int, ...],
+    margin: int
+) -> bool:
+    '''Проверка обрезанного лица'''
+
+    x1, y1, x2, y2 = bbox
+    frame_height, frame_width = frame_shape[:2]
+
+    if (
+        x1 <= margin
+        or
+        y1 <= margin
+        or
+        x2 >= frame_width - margin
+        or
+        y2 >= frame_height - margin
+    ):
+        return True
+    return False
+
+
 def crop_bbox_from_frame(
     frame: np.ndarray,
     bbox: list[int] | tuple[float, float, float, float] | np.ndarray | None,
@@ -107,6 +130,33 @@ def calculate_bbox_center_distance(
     )
 
 
+def normalize_face_pose(
+    pose: Any,
+) -> tuple[float | None, float | None, float | None]:
+    '''Нормализует положение головы в формате pitch, yaw, roll.'''
+
+    if pose is None:
+        return None, None, None
+
+    try:
+        normalized_pose = np.asarray(
+            pose,
+            dtype=np.float64,
+        ).reshape(-1)
+    except (TypeError, ValueError):
+        return None, None, None
+
+    if normalized_pose.size != 3:
+        return None, None, None
+
+    if not np.isfinite(normalized_pose).all():
+        return None, None, None
+
+    pitch, yaw, roll = normalized_pose
+
+    return float(pitch), float(yaw), float(roll)
+
+
 def is_face_position_valid(
     face_bbox: list[int],
     person_bbox: list[int],
@@ -152,6 +202,173 @@ def calculate_face_quality(face_crop: np.ndarray | None) -> float:
     sharpness_score = cv2.Laplacian(gray, cv2.CV_64F).var()
 
     return float(area_score + sharpness_score)
+
+
+def calculate_angle_score(
+    angle: float,
+    limit: float,
+) -> float:
+    '''Рассчитывает качество положения головы для одного угла'''
+
+    if limit == 0:
+        return 1.0 if abs(angle) <= 1e-6 else 0.0
+
+    score = 1.0 - abs(angle) / limit
+
+    return float(min(max(score, 0.0), 1.0))
+
+
+def calculate_identity_quality_metrics(
+    face_crop: np.ndarray,
+    bbox: list[int],
+    frame_shape: tuple[int, ...],
+    detector_confidence: float,
+    pose: Any,
+    config: FacesConfig,
+) -> dict[str, Any]:
+    '''Рассчитывает пригодность лица для идентификации.'''
+
+    x1, y1, x2, y2 = bbox
+
+    face_height = y2 - y1
+    face_width = x2 - x1
+    face_area = face_height * face_width
+
+    gray = cv2.cvtColor(
+        face_crop,
+        cv2.COLOR_RGB2GRAY,
+    )
+    sharpness = float(
+        cv2.Laplacian(
+            gray,
+            cv2.CV_64F,
+        ).var()
+    )
+
+    is_face_clipped = is_face_bbox_clipped(
+        bbox=bbox,
+        frame_shape=frame_shape,
+        margin=config.identity_frame_margin,
+    )
+
+    pitch, yaw, roll = normalize_face_pose(pose)
+
+    pose_available = (
+        pitch is not None
+        and yaw is not None
+        and roll is not None
+    )
+
+    rejection_reasons: list[str] = []
+
+    if (
+        face_height < config.min_face_size
+        or face_width < config.min_face_size
+    ):
+        rejection_reasons.append('face_too_small')
+
+    if detector_confidence < config.min_identity_confidence:
+        rejection_reasons.append('low_detector_confidence')
+
+    if sharpness < config.min_identity_sharpness:
+        rejection_reasons.append('low_sharpness')
+
+    if is_face_clipped:
+        rejection_reasons.append('face_clipped')
+
+    if pose_available:
+        if abs(pitch) > config.max_identity_pitch:
+            rejection_reasons.append('excessive_pitch')
+
+        if abs(yaw) > config.max_identity_yaw:
+            rejection_reasons.append('excessive_yaw')
+
+        if abs(roll) > config.max_identity_roll:
+            rejection_reasons.append('excessive_roll')
+
+    confidence_score = min(
+        max(float(detector_confidence), 0.0),
+        1.0,
+    )
+
+    size_target = config.min_face_size * 2
+    size_score = min(
+        max(
+            min(face_width, face_height) / size_target,
+            0.0,
+        ),
+        1.0,
+    )
+
+    if config.min_identity_sharpness == 0:
+        sharpness_score = 1.0
+    else:
+        sharpness_target = config.min_identity_sharpness * 2
+        sharpness_score = min(
+            max(
+                sharpness / sharpness_target,
+                0.0,
+            ),
+            1.0,
+        )
+
+    crop_score = 0.0 if is_face_clipped else 1.0
+
+    if pose_available:
+        pitch_score = calculate_angle_score(
+            pitch,
+            config.max_identity_pitch,
+        )
+        yaw_score = calculate_angle_score(
+            yaw,
+            config.max_identity_yaw,
+        )
+        roll_score = calculate_angle_score(
+            roll,
+            config.max_identity_roll,
+        )
+
+        pose_score = (
+            pitch_score
+            + yaw_score
+            + roll_score
+        ) / 3
+    else:
+        pose_score = 0.5
+
+    identity_quality_score = (
+        confidence_score * 0.30
+        + sharpness_score * 0.25
+        + size_score * 0.20
+        + pose_score * 0.15
+        + crop_score * 0.10
+    )
+    identity_quality_score = float(
+        min(
+            max(identity_quality_score, 0.0),
+            1.0,
+        )
+    )
+
+    return {
+        'face_width': face_width,
+        'face_height': face_height,
+        'face_area': face_area,
+        'sharpness_score': sharpness,
+        'is_face_clipped': is_face_clipped,
+        'pitch': pitch,
+        'yaw': yaw,
+        'roll': roll,
+        'pose_available': pose_available,
+        'identity_confidence_score': confidence_score,
+        'size_score': float(size_score),
+        'sharpness_normalized': float(sharpness_score),
+        'pose_score': float(pose_score),
+        'crop_score': crop_score,
+        'identity_quality_score': identity_quality_score,
+        'is_identity_eligible': not rejection_reasons,
+        'identity_rejection_reasons': rejection_reasons,
+    }
 
 
 def normalize_embedding(embedding: np.ndarray | None) -> list[float] | None:
@@ -256,7 +473,20 @@ def build_face_candidate_from_insightface_face(
     if face_crop_bgr is None:
         return None
 
+    detector_confidence = float(insightface_face.det_score)
+    pose = getattr(insightface_face, 'pose', None)
+
     face_crop_rgb = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2RGB)
+
+    identity_metrics = calculate_identity_quality_metrics(
+        face_crop=face_crop_rgb,
+        bbox=bbox,
+        frame_shape=frame.shape,
+        detector_confidence=detector_confidence,
+        pose=pose,
+        config=config,
+    )
+
     embedding = getattr(insightface_face, 'normed_embedding', None)
 
     if embedding is None:
@@ -265,7 +495,7 @@ def build_face_candidate_from_insightface_face(
     return {
         'face_crop': face_crop_rgb,
         'bbox': bbox,
-        'confidence': float(insightface_face.det_score),
+        'confidence': detector_confidence,
         'quality_score': calculate_face_quality(face_crop_rgb),
         'source': source,
         'detector': 'insightface',
@@ -273,6 +503,7 @@ def build_face_candidate_from_insightface_face(
         'embedding': normalize_embedding(embedding),
         'gender': normalize_gender(getattr(insightface_face, 'gender', None)),
         'age_estimate': normalize_age(getattr(insightface_face, 'age', None)),
+        **identity_metrics,
     }
 
 

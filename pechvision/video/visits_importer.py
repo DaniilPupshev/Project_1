@@ -34,6 +34,24 @@ def build_best_face_extra_data(best_face: dict[str, Any] | None) -> dict[str, An
         'embedding_dim': len(embedding) if embedding is not None else None,
         'gender': best_face.get('gender'),
         'age_estimate': best_face.get('age_estimate'),
+        'identity_quality_score': best_face.get('identity_quality_score'),
+        'is_identity_eligible': best_face.get('is_identity_eligible'),
+        'identity_rejection_reasons': best_face.get(
+            'identity_rejection_reasons'
+        ),
+        'sharpness_score': best_face.get('sharpness_score'),
+        'is_face_clipped': best_face.get('is_face_clipped'),
+        'pitch': best_face.get('pitch'),
+        'yaw': best_face.get('yaw'),
+        'roll': best_face.get('roll'),
+        'pose_available': best_face.get('pose_available'),
+        'identity_confidence_score': best_face.get(
+            'identity_confidence_score'
+        ),
+        'size_score': best_face.get('size_score'),
+        'sharpness_normalized': best_face.get('sharpness_normalized'),
+        'pose_score': best_face.get('pose_score'),
+        'crop_score': best_face.get('crop_score'),
     }
 
 
@@ -124,11 +142,15 @@ def save_best_face_for_visit(
     embedding = best_face.get('embedding')
     seen_at = db_visit.entered_at or db_visit.ocr_entered_at
 
-    face_quality_score = best_face.get('quality_score')
+    identity_eligible = bool(
+        best_face.get('is_identity_eligible', False)
+    )
+
+    face_quality_score = best_face.get('identity_quality_score')
     staff_member = None
     staff_similarity = None
 
-    if staff_matching_enabled:
+    if staff_matching_enabled and identity_eligible:
         staff_member, staff_similarity = find_matching_staff(
             session=session,
             embedding=embedding,
@@ -144,7 +166,8 @@ def save_best_face_for_visit(
         db_visit.is_staff = True
         db_visit.staff_id = staff_member.id
         db_visit.person_id = None
-    else:
+
+    elif identity_eligible:
         person, person_created, person_similarity, best_face_updated = (
             get_or_create_person_for_face(
                 session=session,
@@ -163,6 +186,11 @@ def save_best_face_for_visit(
     face_extra_data['person_created'] = person_created
     face_extra_data['person_similarity'] = person_similarity
     face_extra_data['person_best_face_updated'] = best_face_updated
+    face_extra_data['identity_matching_skipped_reason'] = (
+        None
+        if identity_eligible
+        else 'face_not_identity_eligible'
+    )
     face_extra_data['staff_id'] = (
         staff_member.id if staff_member is not None else None
     )
