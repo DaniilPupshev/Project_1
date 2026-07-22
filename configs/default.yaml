@@ -158,6 +158,15 @@ faces:
   # Максимальное roll-отклонение
   max_identity_roll: 30.0
 
+  # Максимальное количество эталонных лиц одной персоны
+  max_identity_references_per_person: 5
+
+  # Максимальное количество эталонов одного ракурса
+  max_identity_references_per_pose: 2
+
+  # Максимальный yaw для категории frontal
+  identity_frontal_yaw_threshold: 15.0
+
   # Как часто искать лица в основном pipeline: 1 = каждый обработанный кадр
   search_every_processed_frames: 10
 

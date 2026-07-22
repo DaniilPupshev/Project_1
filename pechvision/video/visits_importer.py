@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 
 from pechvision.db.models import Face, Visit
 from pechvision.identity.person_matcher import get_or_create_person_for_face
+from pechvision.identity.reference_manager import (
+    refresh_person_identity_references,
+)
 from pechvision.identity.staff_matcher import find_matching_staff
 
 
@@ -45,6 +48,7 @@ def build_best_face_extra_data(best_face: dict[str, Any] | None) -> dict[str, An
         'yaw': best_face.get('yaw'),
         'roll': best_face.get('roll'),
         'pose_available': best_face.get('pose_available'),
+        'pose_category': best_face.get('pose_category'),
         'identity_confidence_score': best_face.get(
             'identity_confidence_score'
         ),
@@ -97,6 +101,8 @@ def save_best_face_for_visit(
     best_face: dict[str, Any] | None,
     faces_dir: str | Path | None,
     recognition_threshold: float,
+    max_identity_references_per_person: int,
+    max_identity_references_per_pose: int,
     staff_matching_enabled: bool = False,
     staff_similarity_threshold: float = 1.0,
 ) -> dict[str, int]:
@@ -205,6 +211,12 @@ def save_best_face_for_visit(
         image_path=str(output_path),
         frame_index=frame_index,
         quality_score=best_face.get('quality_score'),
+        identity_quality_score=best_face.get(
+            'identity_quality_score'
+        ),
+        is_identity_eligible=identity_eligible,
+        is_identity_reference=False,
+        pose_category=best_face.get('pose_category'),
         embedding=best_face.get('embedding'),
         gender=best_face.get('gender'),
         gender_confidence=None,
@@ -215,6 +227,16 @@ def save_best_face_for_visit(
     )
 
     session.add(db_face)
+
+    if person is not None and identity_eligible:
+        refresh_person_identity_references(
+            session=session,
+            person_id=person.id,
+            max_references_per_person=(
+                max_identity_references_per_person
+            ),
+            max_references_per_pose=max_identity_references_per_pose,
+        )
 
     return {
         'faces_created': 1,
@@ -231,6 +253,8 @@ def save_visits(
     processing_run_id: int,
     visits: list[dict[str, Any]],
     recognition_threshold: float,
+    max_identity_references_per_person: int,
+    max_identity_references_per_pose: int,
     staff_matching_enabled: bool = False,
     staff_similarity_threshold: float = 1.0,
     faces_dir: str | Path | None = None,
@@ -321,6 +345,8 @@ def save_visits(
             faces_dir=faces_dir,
             recognition_threshold=recognition_threshold,
             staff_matching_enabled=staff_matching_enabled,
+            max_identity_references_per_person=max_identity_references_per_person,
+            max_identity_references_per_pose=max_identity_references_per_pose,
             staff_similarity_threshold=staff_similarity_threshold,
         )
 

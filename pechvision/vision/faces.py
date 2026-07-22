@@ -1,3 +1,4 @@
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,29 @@ def normalize_face_pose(
     return float(pitch), float(yaw), float(roll)
 
 
+def classify_face_pose(
+    yaw: float | None,
+    frontal_yaw_threshold: float,
+) -> str:
+    '''Классифицирует ракурс лица по углу yaw'''
+
+    if yaw is None or not math.isfinite(yaw):
+        return 'unknown'
+
+    if frontal_yaw_threshold < 0:
+        raise ValueError(
+            'frontal_yaw_threshold должен быть >= 0'
+        )
+
+    if abs(yaw) <= frontal_yaw_threshold:
+        return 'frontal'
+
+    if yaw < -frontal_yaw_threshold:
+        return 'left'
+
+    return 'right'
+
+
 def is_face_position_valid(
     face_bbox: list[int],
     person_bbox: list[int],
@@ -257,6 +281,11 @@ def calculate_identity_quality_metrics(
         pitch is not None
         and yaw is not None
         and roll is not None
+    )
+
+    pose_category = classify_face_pose(
+        yaw=yaw,
+        frontal_yaw_threshold=config.identity_frontal_yaw_threshold,
     )
 
     rejection_reasons: list[str] = []
@@ -360,6 +389,7 @@ def calculate_identity_quality_metrics(
         'yaw': yaw,
         'roll': roll,
         'pose_available': pose_available,
+        'pose_category': pose_category,
         'identity_confidence_score': confidence_score,
         'size_score': float(size_score),
         'sharpness_normalized': float(sharpness_score),

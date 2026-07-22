@@ -294,6 +294,8 @@ def process_video_command(
         total=100.0,
         desc='PechVision: preparing',
         unit='%',
+        dynamic_ncols=True,
+        mininterval=0.2,
         bar_format='{desc}: {percentage:6.2f}%|{bar}| {elapsed}<{remaining}',
     )
 
@@ -328,16 +330,27 @@ def process_video_command(
             return
 
         start_percent, end_percent = stage_range
-        ratio = 0.0 if total is None else 1.0 if total <= 0 else completed / total
+
+        if total is None:
+            ratio = 0.0
+        elif total <= 0:
+            ratio = 1.0
+        else:
+            ratio = completed / total
+
         ratio = min(1.0, max(0.0, ratio))
-        target_percent = start_percent + (end_percent - start_percent) * ratio
+        target_percent = start_percent + (
+            end_percent - start_percent
+        ) * ratio
         progress_delta = target_percent - progress_bar.n
 
-        if progress_delta > 0:
-            progress_bar.update(progress_delta)
+        stage_changed = stage != current_progress_stage
 
-        if stage != current_progress_stage:
-            progress_bar.set_description(stage_labels[stage], refresh=False)
+        if stage_changed:
+            progress_bar.set_description(
+                stage_labels[stage],
+                refresh=False,
+            )
             current_progress_stage = stage
 
             if stage == 'video':
@@ -349,35 +362,53 @@ def process_video_command(
             or total is not None and completed >= total
         )
 
-        if not should_refresh_details:
-            return
+        if should_refresh_details:
+            if stage == 'video' and details is not None:
+                timestamp_seconds = details.get('timestamp_seconds')
+                postfix = {
+                    'frame': details.get('frame_index'),
+                }
 
-        if stage == 'video' and details is not None:
-            timestamp_seconds = details.get('timestamp_seconds')
-            postfix = {'frame': details.get('frame_index')}
+                if video_progress_started_at is not None:
+                    elapsed_seconds = (
+                        monotonic() - video_progress_started_at
+                    )
 
-            if video_progress_started_at is not None:
-                elapsed_seconds = monotonic() - video_progress_started_at
+                    if elapsed_seconds > 0:
+                        postfix['speed'] = (
+                            f'{completed / elapsed_seconds:.1f} frame/s'
+                        )
 
-                if elapsed_seconds > 0:
-                    postfix['speed'] = f'{completed / elapsed_seconds:.1f} frame/s'
+                if timestamp_seconds is not None:
+                    postfix['video_time'] = (
+                        f'{timestamp_seconds:.1f}s'
+                    )
 
-            if timestamp_seconds is not None:
-                postfix['video_time'] = f'{timestamp_seconds:.1f}s'
+                progress_bar.set_postfix(
+                    postfix,
+                    refresh=False,
+                )
 
-            progress_bar.set_postfix(postfix)
+            elif stage == 'ocr' and details is not None:
+                progress_bar.set_postfix(
+                    ocr=f'{completed}/{total}',
+                    cache=details.get('cached_frames'),
+                    refresh=False,
+                )
 
-        elif stage == 'ocr' and details is not None:
-            progress_bar.set_postfix(
-                visits=f'{completed}/{total}',
-                cached_frames=details.get('cached_frames'),
-            )
+            elif stage == 'save':
+                progress_bar.set_postfix(
+                    visits=f'{completed}/{total}',
+                    refresh=False,
+                )
 
-        elif stage == 'save':
-            progress_bar.set_postfix(visits=f'{completed}/{total}')
+            elif stage == 'completed':
+                progress_bar.set_postfix(refresh=False)
 
-        elif stage == 'completed':
-            progress_bar.set_postfix()
+        if progress_delta > 0:
+            progress_bar.update(progress_delta)
+        elif stage_changed or should_refresh_details:
+            progress_bar.refresh()
 
     try:
         processing_run = create_processing_run(
@@ -414,6 +445,12 @@ def process_video_command(
             faces_dir=config.paths.faces_dir,
             recognition_threshold=config.faces.recognition_threshold,
             staff_matching_enabled=config.cashiers.enabled,
+            max_identity_references_per_person=(
+                config.faces.max_identity_references_per_person
+            ),
+            max_identity_references_per_pose=(
+                config.faces.max_identity_references_per_pose
+            ),
             staff_similarity_threshold=config.cashiers.similarity_threshold,
             progress_callback=update_progress,
         )

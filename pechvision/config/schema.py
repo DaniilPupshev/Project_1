@@ -76,6 +76,9 @@ class FacesConfig(BaseModel):
     max_identity_yaw: float = Field(ge=0.0, le=90.0)
     max_identity_pitch: float = Field(ge=0.0, le=90.0)
     max_identity_roll: float = Field(ge=0.0, le=90.0)
+    max_identity_references_per_person: PositiveInt
+    max_identity_references_per_pose: PositiveInt
+    identity_frontal_yaw_threshold: float = Field(ge=0.0, le=90.0)
     search_every_processed_frames: PositiveInt
     save_best_face: bool
 

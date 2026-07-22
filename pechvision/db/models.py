@@ -339,6 +339,13 @@ class Face(TimestampMixin, Base):
     '''Таблица характеристик лиц людей'''
 
     __tablename__ = 'faces'
+    __table_args__ = (
+        Index(
+            'ix_faces_person_identity_reference',
+            'person_id',
+            'is_identity_reference',
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     person_id: Mapped[int | None] = mapped_column(
@@ -361,6 +368,24 @@ class Face(TimestampMixin, Base):
 
     quality_score: Mapped[float | None] = mapped_column(
         Float,
+        nullable=True
+    )
+    identity_quality_score: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True
+    )
+    is_identity_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+    is_identity_reference: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+    pose_category: Mapped[str | None] = mapped_column(
+        String(20),
         nullable=True
     )
     embedding: Mapped[list[float] | None] = mapped_column(
