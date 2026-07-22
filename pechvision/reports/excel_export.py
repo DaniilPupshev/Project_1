@@ -897,7 +897,8 @@ def build_receipts_sheet(
         'Способ датирования',
         'Мин. разница, сек.',
         'Неоднозначное совпадение',
-        'Групповое совпадение',
+        'Несколько связанных визитов',
+        'Группа подтверждена',
         *photo_headers,
         'Комментарий',
         'Источник чеков',
@@ -956,16 +957,16 @@ def build_receipts_sheet(
                 default=None,
             ),
             yes_no(any(match.is_ambiguous for match in receipt_matches)),
+            yes_no(len(matched_visits) > 1),
             yes_no(
                 any(match.is_group_match for match in receipt_matches)
-                or len(matched_visits) > 1
             ),
         ]
 
         for column, value in enumerate(values, start=1):
             worksheet.cell(row_index, column, value)
 
-        photo_start_column = 17
+        photo_start_column = 18
 
         for photo_index in range(MAX_RECEIPT_PHOTOS):
             column = photo_start_column + photo_index
@@ -1034,7 +1035,8 @@ def build_receipts_sheet(
         13: 24,
         14: 18,
         15: 20,
-        16: 20,
+        16: 26,
+        17: 22,
         comment_column: 34,
         source_column: 38,
     }
