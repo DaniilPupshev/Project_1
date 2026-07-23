@@ -445,6 +445,8 @@ def process_video_command(
             faces_dir=config.paths.faces_dir,
             recognition_threshold=config.faces.recognition_threshold,
             staff_matching_enabled=config.cashiers.enabled,
+            identity_candidate_limit=config.faces.identity_candidate_limit,
+            identity_ambiguity_margin=config.faces.identity_ambiguity_margin,
             max_identity_references_per_person=(
                 config.faces.max_identity_references_per_person
             ),
@@ -474,6 +476,7 @@ def process_video_command(
             'faces_created': save_stats['faces_created'],
             'persons_created': save_stats['persons_created'],
             'persons_matched': save_stats['persons_matched'],
+            'persons_ambiguous': save_stats['persons_ambiguous'],
             'persons_best_face_updated': save_stats[
                 'persons_best_face_updated'
             ],
@@ -517,6 +520,9 @@ def process_video_command(
     click.echo(f'Faces created: {save_stats["faces_created"]}')
     click.echo(f'Persons created: {save_stats["persons_created"]}')
     click.echo(f'Persons matched: {save_stats["persons_matched"]}')
+    click.echo(
+        f'Persons ambiguous: {save_stats["persons_ambiguous"]}'
+    )
     click.echo(
         'Persons best face updated: '
         f'{save_stats["persons_best_face_updated"]}'

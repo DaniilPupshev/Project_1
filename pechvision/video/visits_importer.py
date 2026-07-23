@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from pechvision.db.models import Face, Visit
+from pechvision.identity.match_result import IdentityMatchStatus
 from pechvision.identity.person_matcher import get_or_create_person_for_face
 from pechvision.identity.reference_manager import (
     refresh_person_identity_references,
@@ -101,6 +103,8 @@ def save_best_face_for_visit(
     best_face: dict[str, Any] | None,
     faces_dir: str | Path | None,
     recognition_threshold: float,
+    identity_candidate_limit: int,
+    identity_ambiguity_margin: float,
     max_identity_references_per_person: int,
     max_identity_references_per_pose: int,
     staff_matching_enabled: bool = False,
@@ -113,6 +117,7 @@ def save_best_face_for_visit(
             'faces_created': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_ambiguous': 0,
             'persons_best_face_updated': 0,
             'staff_visits_matched': 0,
         }
@@ -124,6 +129,7 @@ def save_best_face_for_visit(
             'faces_created': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_ambiguous': 0,
             'persons_best_face_updated': 0,
             'staff_visits_matched': 0,
         }
@@ -132,15 +138,26 @@ def save_best_face_for_visit(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     frame_index = best_face.get('frame_index')
-    output_path = output_dir / f'visit_{db_visit.id}_track_{track_id}_face.jpg'
-    face_crop_bgr = cv2.cvtColor(face_crop_rgb, cv2.COLOR_RGB2BGR)
-    saved = cv2.imwrite(str(output_path), face_crop_bgr)
+    output_path = (
+        output_dir
+        / f'visit_{db_visit.id}_track_{track_id}_face.jpg'
+    )
+
+    face_crop_bgr = cv2.cvtColor(
+        face_crop_rgb,
+        cv2.COLOR_RGB2BGR,
+    )
+    saved = cv2.imwrite(
+        str(output_path),
+        face_crop_bgr,
+    )
 
     if not saved:
         return {
             'faces_created': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_ambiguous': 0,
             'persons_best_face_updated': 0,
             'staff_visits_matched': 0,
         }
@@ -151,8 +168,10 @@ def save_best_face_for_visit(
     identity_eligible = bool(
         best_face.get('is_identity_eligible', False)
     )
+    face_quality_score = best_face.get(
+        'identity_quality_score'
+    )
 
-    face_quality_score = best_face.get('identity_quality_score')
     staff_member = None
     staff_similarity = None
 
@@ -167,6 +186,7 @@ def save_best_face_for_visit(
     person_created = False
     person_similarity = None
     best_face_updated = False
+    match_result = None
 
     if staff_member is not None:
         db_visit.is_staff = True
@@ -174,34 +194,75 @@ def save_best_face_for_visit(
         db_visit.person_id = None
 
     elif identity_eligible:
-        person, person_created, person_similarity, best_face_updated = (
-            get_or_create_person_for_face(
-                session=session,
-                embedding=embedding,
-                face_image_path=str(output_path),
-                seen_at=seen_at,
-                threshold=recognition_threshold,
-                face_quality_score=face_quality_score,
-            )
+        (
+            person,
+            person_created,
+            match_result,
+            best_face_updated,
+        ) = get_or_create_person_for_face(
+            session=session,
+            embedding=embedding,
+            face_image_path=str(output_path),
+            seen_at=seen_at,
+            recognition_threshold=recognition_threshold,
+            candidate_limit=identity_candidate_limit,
+            ambiguity_margin=identity_ambiguity_margin,
+            face_quality_score=face_quality_score,
         )
+
+        person_similarity = match_result.similarity
 
         if person is not None:
             db_visit.person_id = person.id
 
-    face_extra_data = build_best_face_extra_data(best_face) or {}
+    if not identity_eligible:
+        identity_matching_skipped_reason = (
+            'face_not_identity_eligible'
+        )
+    elif staff_member is not None:
+        identity_matching_skipped_reason = 'staff_match'
+    elif (
+        match_result is not None
+        and match_result.status == IdentityMatchStatus.AMBIGUOUS
+    ):
+        identity_matching_skipped_reason = (
+            'ambiguous_identity_candidates'
+        )
+    elif (
+        match_result is not None
+        and match_result.status
+        == IdentityMatchStatus.INVALID_EMBEDDING
+    ):
+        identity_matching_skipped_reason = 'invalid_embedding'
+    else:
+        identity_matching_skipped_reason = None
+
+    face_extra_data = build_best_face_extra_data(
+        best_face
+    ) or {}
+
     face_extra_data['person_created'] = person_created
     face_extra_data['person_similarity'] = person_similarity
-    face_extra_data['person_best_face_updated'] = best_face_updated
+    face_extra_data['person_best_face_updated'] = (
+        best_face_updated
+    )
     face_extra_data['identity_matching_skipped_reason'] = (
-        None
-        if identity_eligible
-        else 'face_not_identity_eligible'
+        identity_matching_skipped_reason
+    )
+    face_extra_data['identity_match'] = (
+        asdict(match_result)
+        if match_result is not None
+        else None
     )
     face_extra_data['staff_id'] = (
-        staff_member.id if staff_member is not None else None
+        staff_member.id
+        if staff_member is not None
+        else None
     )
     face_extra_data['external_staff_key'] = (
-        staff_member.external_staff_key if staff_member is not None else None
+        staff_member.external_staff_key
+        if staff_member is not None
+        else None
     )
     face_extra_data['staff_similarity'] = staff_similarity
 
@@ -217,7 +278,7 @@ def save_best_face_for_visit(
         is_identity_eligible=identity_eligible,
         is_identity_reference=False,
         pose_category=best_face.get('pose_category'),
-        embedding=best_face.get('embedding'),
+        embedding=embedding,
         gender=best_face.get('gender'),
         gender_confidence=None,
         age_estimate=best_face.get('age_estimate'),
@@ -235,15 +296,36 @@ def save_best_face_for_visit(
             max_references_per_person=(
                 max_identity_references_per_person
             ),
-            max_references_per_pose=max_identity_references_per_pose,
+            max_references_per_pose=(
+                max_identity_references_per_pose
+            ),
         )
+
+    persons_ambiguous = (
+        1
+        if (
+            match_result is not None
+            and match_result.status
+            == IdentityMatchStatus.AMBIGUOUS
+        )
+        else 0
+    )
 
     return {
         'faces_created': 1,
         'persons_created': 1 if person_created else 0,
-        'persons_matched': 1 if person is not None and not person_created else 0,
-        'persons_best_face_updated': 1 if best_face_updated else 0,
-        'staff_visits_matched': 1 if staff_member is not None else 0,
+        'persons_matched': (
+            1
+            if person is not None and not person_created
+            else 0
+        ),
+        'persons_ambiguous': persons_ambiguous,
+        'persons_best_face_updated': (
+            1 if best_face_updated else 0
+        ),
+        'staff_visits_matched': (
+            1 if staff_member is not None else 0
+        ),
     }
 
 
@@ -253,6 +335,8 @@ def save_visits(
     processing_run_id: int,
     visits: list[dict[str, Any]],
     recognition_threshold: float,
+    identity_candidate_limit: int,
+    identity_ambiguity_margin: float,
     max_identity_references_per_person: int,
     max_identity_references_per_pose: int,
     staff_matching_enabled: bool = False,
@@ -275,6 +359,7 @@ def save_visits(
             'skipped_existing': 0,
             'persons_created': 0,
             'persons_matched': 0,
+            'persons_ambiguous': 0,
             'persons_best_face_updated': 0,
             'staff_visits_matched': 0,
         }
@@ -286,6 +371,7 @@ def save_visits(
     persons_matched = 0
     persons_best_face_updated = 0
     staff_visits_matched = 0
+    persons_ambiguous = 0
 
     total_visits = len(visits)
 
@@ -346,6 +432,8 @@ def save_visits(
             recognition_threshold=recognition_threshold,
             staff_matching_enabled=staff_matching_enabled,
             max_identity_references_per_person=max_identity_references_per_person,
+            identity_candidate_limit=identity_candidate_limit,
+            identity_ambiguity_margin=identity_ambiguity_margin,
             max_identity_references_per_pose=max_identity_references_per_pose,
             staff_similarity_threshold=staff_similarity_threshold,
         )
@@ -356,6 +444,7 @@ def save_visits(
         persons_created += face_stats['persons_created']
         persons_matched += face_stats['persons_matched']
         staff_visits_matched += face_stats['staff_visits_matched']
+        persons_ambiguous += face_stats['persons_ambiguous']
 
         if progress_callback is not None:
             progress_callback(
@@ -373,6 +462,7 @@ def save_visits(
         'faces_created': faces_created,
         'persons_created': persons_created,
         'persons_matched': persons_matched,
+        'persons_ambiguous': persons_ambiguous,
         'skipped_existing': skipped_existing,
         'persons_best_face_updated': persons_best_face_updated,
         'staff_visits_matched': staff_visits_matched,

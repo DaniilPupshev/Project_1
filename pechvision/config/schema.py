@@ -79,6 +79,8 @@ class FacesConfig(BaseModel):
     max_identity_references_per_person: PositiveInt
     max_identity_references_per_pose: PositiveInt
     identity_frontal_yaw_threshold: float = Field(ge=0.0, le=90.0)
+    identity_candidate_limit: PositiveInt
+    identity_ambiguity_margin: float = Field(ge=0.0, le=1.0)
     search_every_processed_frames: PositiveInt
     save_best_face: bool
 
