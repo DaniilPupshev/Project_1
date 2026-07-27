@@ -117,6 +117,10 @@ class ReportsConfig(BaseModel):
     formats: list[Literal['csv', 'xlsx']]
 
 
+class VisitSessionsConfig(BaseModel):
+    merge_timeout_seconds: PositiveInt
+
+
 class AppConfig(BaseModel):
     project: ProjectConfig
     database: DatabaseConfig
@@ -132,3 +136,4 @@ class AppConfig(BaseModel):
     receipts: ReceiptsConfig
     matching: MatchingConfig
     reports: ReportsConfig
+    visit_sessions: VisitSessionsConfig

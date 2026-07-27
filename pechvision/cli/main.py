@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from tqdm import tqdm
 
 from pechvision.config.loader import load_config
-from pechvision.db.models import ProcessingRun
+from pechvision.db.models import ProcessingRun, Video
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.identity.staff_matcher import classify_existing_staff, has_active_staff
 from pechvision.identity.staff_registry import register_staff_from_registry
@@ -30,6 +30,9 @@ from pechvision.vision.person_detector import detect_people
 from pechvision.vision.tracker import track_people
 from pechvision.vision.visits_builder import VisitsBuilder
 from pechvision.vision.zone import filter_detections_in_zone, get_bbox_point
+from pechvision.visits.session_importer import (
+    synchronize_visit_sessions_for_video,
+)
 
 
 @click.group()
@@ -301,9 +304,10 @@ def process_video_command(
 
     stage_ranges = {
         'registration': (0.0, 1.0),
-        'video': (1.0, 93.0),
-        'ocr': (93.0, 99.0),
-        'save': (99.0, 99.8),
+        'video': (1.0, 92.0),
+        'ocr': (92.0, 98.0),
+        'save': (98.0, 99.4),
+        'sessions': (99.4, 99.8),
         'completed': (99.8, 100.0),
     }
     stage_labels = {
@@ -311,6 +315,7 @@ def process_video_command(
         'video': 'PechVision: video analysis',
         'ocr': 'PechVision: OCR',
         'save': 'PechVision: saving results',
+        'sessions': 'PechVision: building visit sessions',
         'completed': 'PechVision: completed',
     }
     current_progress_stage = None
@@ -402,6 +407,12 @@ def process_video_command(
                     refresh=False,
                 )
 
+            elif stage == 'sessions' and details is not None:
+                progress_bar.set_postfix(
+                    sessions=details.get('sessions_total'),
+                    refresh=False,
+                )
+
             elif stage == 'completed':
                 progress_bar.set_postfix(refresh=False)
 
@@ -457,6 +468,21 @@ def process_video_command(
             progress_callback=update_progress,
         )
 
+        session_stats = synchronize_visit_sessions_for_video(
+            session=session,
+            video_id=video_id,
+            merge_timeout_seconds=(
+                config.visit_sessions.merge_timeout_seconds
+            ),
+        )
+
+        update_progress(
+            'sessions',
+            1,
+            1,
+            session_stats,
+        )
+
         finished_run = session.get(ProcessingRun, processing_run_id)
 
         if finished_run is None:
@@ -481,6 +507,17 @@ def process_video_command(
                 'persons_best_face_updated'
             ],
             'staff_visits_matched': save_stats['staff_visits_matched'],
+            'visit_sessions_total': session_stats['sessions_total'],
+            'visit_sessions_created': session_stats['created'],
+            'visit_sessions_updated': session_stats['updated'],
+            'visit_sessions_unchanged': session_stats['unchanged'],
+            'visit_sessions_deleted': session_stats['deleted'],
+            'visit_sessions_linked_visits': session_stats[
+                'linked_visits'
+            ],
+            'visit_sessions_unlinked_visits': session_stats[
+                'unlinked_visits'
+            ],
         }
 
         session.commit()
@@ -516,6 +553,34 @@ def process_video_command(
     click.echo(f'Limit: {limit}')
     click.echo(f'Visits found: {len(visits)}')
     click.echo(f'Visits created: {save_stats["created"]}')
+    click.echo(
+        f'Visit sessions total: '
+        f'{session_stats["sessions_total"]}'
+    )
+    click.echo(
+        f'Visit sessions created: '
+        f'{session_stats["created"]}'
+    )
+    click.echo(
+        f'Visit sessions updated: '
+        f'{session_stats["updated"]}'
+    )
+    click.echo(
+        f'Visit sessions unchanged: '
+        f'{session_stats["unchanged"]}'
+    )
+    click.echo(
+        f'Visit sessions deleted: '
+        f'{session_stats["deleted"]}'
+    )
+    click.echo(
+        f'Visit sessions linked visits: '
+        f'{session_stats["linked_visits"]}'
+    )
+    click.echo(
+        f'Visit sessions unlinked visits: '
+        f'{session_stats["unlinked_visits"]}'
+    )
     click.echo(f'Visits skipped existing: {save_stats["skipped_existing"]}')
     click.echo(f'Faces created: {save_stats["faces_created"]}')
     click.echo(f'Persons created: {save_stats["persons_created"]}')
@@ -680,6 +745,83 @@ def classify_staff_command(
             f'similarity={match["similarity"]:.3f}, '
             f'already_classified={match["already_classified"]}'
         )
+
+
+@cli.command('sync-visit-sessions')
+@click.argument(
+    'config_path',
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.argument('video_id', type=int)
+@click.option(
+    '--dry-run',
+    is_flag=True,
+    help='Проверить синхронизацию без сохранения изменений',
+)
+def sync_visit_sessions_command(
+    config_path: str,
+    video_id: int,
+    dry_run: bool,
+) -> None:
+    '''Синхронизация логических сессий выбранного видео.'''
+
+    if video_id < 1:
+        raise click.ClickException(
+            'video_id должен быть >= 1'
+        )
+
+    config = load_config(config_path)
+    engine = make_engine(config)
+    session_factory = make_session_factory(engine)
+    session = session_factory()
+
+    try:
+        video = session.get(Video, video_id)
+
+        if video is None:
+            raise click.ClickException(
+                f'Видео с ID {video_id} не найдено'
+            )
+
+        stats = synchronize_visit_sessions_for_video(
+            session=session,
+            video_id=video_id,
+            merge_timeout_seconds=(
+                config.visit_sessions.merge_timeout_seconds
+            ),
+        )
+
+        if dry_run:
+            session.rollback()
+        else:
+            session.commit()
+
+    except click.ClickException:
+        session.rollback()
+        raise
+    except Exception as exc:
+        session.rollback()
+        raise click.ClickException(
+            'Ошибка синхронизации логических сессий: '
+            f'{exc}'
+        ) from exc
+    finally:
+        session.close()
+
+    mode = 'DRY-RUN' if dry_run else 'COMMIT'
+
+    click.echo('VISIT SESSIONS SYNC FINISHED')
+    click.echo('-' * 20)
+    click.echo(f'Mode: {mode}')
+    click.echo(f'Video ID: {video_id}')
+    click.echo(f'Visits total: {stats["visits_total"]}')
+    click.echo(f'Sessions total: {stats["sessions_total"]}')
+    click.echo(f'Created: {stats["created"]}')
+    click.echo(f'Updated: {stats["updated"]}')
+    click.echo(f'Unchanged: {stats["unchanged"]}')
+    click.echo(f'Deleted: {stats["deleted"]}')
+    click.echo(f'Linked visits: {stats["linked_visits"]}')
+    click.echo(f'Unlinked visits: {stats["unlinked_visits"]}')
 
 
 @cli.command('match-receipts')

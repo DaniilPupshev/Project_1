@@ -115,6 +115,9 @@ class Video(TimestampMixin, Base):
         cascade='all, delete-orphan',
     )
     visits: Mapped[list['Visit']] = relationship(back_populates='video')
+    visit_sessions: Mapped[list['VisitSession']] = relationship(
+        back_populates='video',
+    )
 
 
 class ProcessingRun(TimestampMixin, Base):
@@ -229,15 +232,25 @@ class Person(TimestampMixin, Base):
 
     visits: Mapped[list['Visit']] = relationship(back_populates='person')
     faces: Mapped[list['Face']] = relationship(back_populates='person')
+    visit_sessions: Mapped[list['VisitSession']] = relationship(
+        back_populates='person',
+    )
 
 
 class Visit(TimestampMixin, Base):
-    '''Таблица посещений людей'''
+    '''Фрагмент посещения, полученный из одного трека'''
 
     __tablename__ = 'visits'
 
     __table_args__ = (
-        UniqueConstraint('event_key', name='uq_visits_event_key'),
+        UniqueConstraint(
+            'event_key',
+            name='uq_visits_event_key',
+        ),
+        Index(
+            'ix_visits_visit_session_id',
+            'visit_session_id',
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -258,6 +271,14 @@ class Visit(TimestampMixin, Base):
     person_id: Mapped[int | None] = mapped_column(
         ForeignKey('persons.id'),
         nullable=True
+    )
+    visit_session_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            'visit_sessions.id',
+            name='fk_visits_visit_session_id_visit_sessions',
+            ondelete='SET NULL',
+        ),
+        nullable=True,
     )
 
     track_id: Mapped[str] = mapped_column(
@@ -333,6 +354,98 @@ class Visit(TimestampMixin, Base):
     faces: Mapped[list['Face']] = relationship(back_populates='visit')
     staff_member: Mapped['Staff | None'] = relationship(back_populates='visits')
     receipt_matches: Mapped[list['ReceiptMatch']] = relationship(back_populates='visit')
+    visit_session: Mapped['VisitSession | None'] = relationship(
+        back_populates='visits',
+    )
+
+
+class VisitSession(TimestampMixin, Base):
+    '''Логическое посещение, объединяющее связанные фрагменты визитов'''
+
+    __tablename__ = 'visit_sessions'
+    __table_args__ = (
+        UniqueConstraint(
+            'session_key',
+            name='uq_visit_sessions_session_key',
+        ),
+        Index(
+            'ix_visit_sessions_video_entered_at',
+            'video_id',
+            'entered_at',
+        ),
+        Index(
+            'ix_visit_sessions_person_entered_at',
+            'person_id',
+            'entered_at',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_key: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False
+    )
+    video_id: Mapped[int] = mapped_column(
+        ForeignKey('videos.id'),
+        nullable=False
+    )
+    person_id: Mapped[int | None] = mapped_column(
+        ForeignKey('persons.id'),
+        nullable=True
+    )
+
+    visit_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True
+    )
+    entered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+    left_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    duration_seconds: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True
+    )
+    entry_frame_index: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True
+    )
+    exit_frame_index: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True
+    )
+
+    segments_count: Mapped[int] = mapped_column(
+        Integer,
+        default=1
+    )
+    time_is_estimated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+
+    extra_data: Mapped[dict | None] = mapped_column(
+        'metadata',
+        JSONB,
+        nullable=True
+    )
+
+    visits: Mapped[list['Visit']] = relationship(
+        back_populates='visit_session',
+        passive_deletes=True,
+    )
+    video: Mapped['Video'] = relationship(
+        back_populates='visit_sessions',
+    )
+    person: Mapped['Person | None'] = relationship(
+        back_populates='visit_sessions',
+    )
 
 
 class Face(TimestampMixin, Base):

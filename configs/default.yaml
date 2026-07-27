@@ -117,6 +117,11 @@ tracking:
   max_missing_seconds: 90
 
 
+visit_sessions:
+  # Максимальный разрыв между фрагментами одной персоны
+  merge_timeout_seconds: 90
+
+
 faces:
   # Набор моделей InsightFace для детекции лиц, embeddings и базовых атрибутов
   model_name: buffalo_l
