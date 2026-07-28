@@ -312,15 +312,6 @@ class Visit(TimestampMixin, Base):
         nullable=True
     )
 
-    ocr_entered_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-    ocr_left_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-
     time_is_estimated: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -353,7 +344,6 @@ class Visit(TimestampMixin, Base):
     person: Mapped['Person | None'] = relationship(back_populates='visits')
     faces: Mapped[list['Face']] = relationship(back_populates='visit')
     staff_member: Mapped['Staff | None'] = relationship(back_populates='visits')
-    receipt_matches: Mapped[list['ReceiptMatch']] = relationship(back_populates='visit')
     visit_session: Mapped['VisitSession | None'] = relationship(
         back_populates='visits',
     )
@@ -445,6 +435,10 @@ class VisitSession(TimestampMixin, Base):
     )
     person: Mapped['Person | None'] = relationship(
         back_populates='visit_sessions',
+    )
+    receipt_matches: Mapped[list['ReceiptMatch']] = relationship(
+        back_populates='visit_session',
+        passive_deletes=True,
     )
 
 
@@ -591,11 +585,20 @@ class ReceiptMatch(TimestampMixin, Base):
     '''Таблица сводки по чекам и посещениям людей'''
 
     __tablename__ = 'receipt_matches'
+    __table_args__ = (
+        UniqueConstraint(
+            'visit_session_id',
+            name='uq_receipt_matches_visit_session_id',
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     
-    visit_id: Mapped[int] = mapped_column(
-        ForeignKey('visits.id'),
+    visit_session_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            'visit_sessions.id',
+            ondelete='CASCADE',
+        ),
         nullable=False
     )
     receipt_id: Mapped[int] = mapped_column(
@@ -640,7 +643,9 @@ class ReceiptMatch(TimestampMixin, Base):
         nullable=True
     )
 
-    visit: Mapped['Visit'] = relationship(back_populates='receipt_matches')
+    visit_session: Mapped['VisitSession'] = relationship(
+        back_populates='receipt_matches',
+    )
     receipt: Mapped['Receipt'] = relationship(back_populates='receipt_matches')
 
 

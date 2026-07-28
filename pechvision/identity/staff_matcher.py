@@ -69,9 +69,9 @@ def repair_persons_after_staff_classification(
             person.best_face_path = None
 
         seen_times = [
-            visit.entered_at or visit.ocr_entered_at
+            visit.entered_at
             for visit in remaining_visits
-            if visit.entered_at is not None or visit.ocr_entered_at is not None
+            if visit.entered_at is not None
         ]
 
         if seen_times:

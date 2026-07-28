@@ -23,7 +23,9 @@ def build_processing_config_payload(
     PROCESSING_CONFIG_SECTIONS = (
         'project',
         'video',
+        'processing',
         'ocr',
+        'timeline',
         'cashier_zone',
         'detection',
         'tracking',

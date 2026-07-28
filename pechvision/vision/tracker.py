@@ -2,7 +2,10 @@ from pathlib import Path
 from typing import Any
 
 from pechvision.config.schema import DetectionConfig, TrackingConfig
-from pechvision.vision.person_detector import get_person_detector
+from pechvision.vision.person_detector import (
+    get_person_tracker,
+    resolve_yolo_device,
+)
 
 
 def track_people(
@@ -17,10 +20,11 @@ def track_people(
     if not model_path.exists():
         raise FileNotFoundError(f'Файл модели детекции не найден: {model_path}')
     
-    model = get_person_detector(str(model_path))
+    model = get_person_tracker(str(model_path))
 
     results = model.track(
         source=frame,
+        device=resolve_yolo_device(detection_config.device),
         conf=detection_config.confidence_threshold,
         iou=detection_config.iou_threshold,
         classes=[detection_config.person_class_id],
@@ -54,3 +58,10 @@ def track_people(
             }
         )
     return tracks
+
+
+def reset_person_tracker(model_path: str | Path) -> None:
+    '''Сбрасывает состояние трекера перед новой активной последовательностью.'''
+
+    model = get_person_tracker(str(model_path))
+    model.predictor = None

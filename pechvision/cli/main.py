@@ -13,9 +13,11 @@ from pechvision.db.models import ProcessingRun, Video
 from pechvision.db.session import make_engine, make_session_factory
 from pechvision.identity.staff_matcher import classify_existing_staff, has_active_staff
 from pechvision.identity.staff_registry import register_staff_from_registry
-from pechvision.matching.receipt_matcher import match_receipts_to_visits
+from pechvision.matching.receipt_matcher import (
+    match_receipts_to_visit_sessions,
+)
 from pechvision.receipts.importer import import_receipts
-from pechvision.video.frames import iter_video_frames, iter_video_frames_range, read_video_frame
+from pechvision.video.frames import iter_video_frames, iter_video_frames_range
 from pechvision.video.metadata import read_video_metadata
 from pechvision.video.ocr import preprocess_ocr_crop, recognize_datetime_from_crop
 from pechvision.video.pipeline import build_visits_from_video
@@ -25,8 +27,19 @@ from pechvision.video.runs import (
     create_processing_run,
     find_existing_processing_run,
 )
+from pechvision.video.time_anchor import (
+    EndTimeValidationStatus,
+    apply_manual_time_anchor_fallback,
+    resolve_ocr_time_anchor,
+    serialize_ocr_attempt,
+    validate_time_anchor_near_video_end,
+)
+from pechvision.video.timeline import VideoTimeline
 from pechvision.video.visits_importer import save_visits
-from pechvision.vision.person_detector import detect_people
+from pechvision.vision.person_detector import (
+    detect_people,
+    resolve_yolo_device,
+)
 from pechvision.vision.tracker import track_people
 from pechvision.vision.visits_builder import VisitsBuilder
 from pechvision.vision.zone import filter_detections_in_zone, get_bbox_point
@@ -65,8 +78,52 @@ def config_check(config_path: str) -> None:
     click.echo(f'Frame step: {config.video.frame_step}')
     click.echo(f'Min visit seconds: {config.video.min_visit_seconds}')
     click.echo(f'Detection model: {config.detection.model_path}\n')
+    click.echo(
+        f'YOLO device: {config.detection.device} '
+        f'-> {resolve_yolo_device(config.detection.device)}'
+    )
+    click.echo(
+        'Active interval: '
+        f'{config.processing.active_interval_seconds} seconds'
+    )
+    click.echo(
+        'Idle interval: '
+        f'{config.processing.idle_interval_seconds} seconds'
+    )
+    click.echo(
+        'Idle after: '
+        f'{config.processing.idle_after_seconds} seconds'
+    )
+    click.echo(
+        'Wake-up rewind: '
+        f'{config.processing.wakeup_rewind_seconds} seconds\n'
+    )
     click.echo(f'Face model: InsightFace {config.faces.model_name}')
     click.echo(f'Face model root: {config.faces.model_root}\n')
+    click.echo(
+        'Timeline anchor offsets: '
+        f'{config.timeline.anchor_search_offsets_seconds}'
+    )
+    click.echo(
+        'Minimum consistent anchors: '
+        f'{config.timeline.minimum_consistent_anchors}'
+    )
+    click.echo(
+        'Anchor consistency tolerance: '
+        f'{config.timeline.anchor_consistency_tolerance_seconds} seconds'
+    )
+    click.echo(
+        'End validation offsets: '
+        f'{config.timeline.end_validation_offsets_before_end_seconds}'
+    )
+    click.echo(
+        'End validation tolerance: '
+        f'{config.timeline.end_validation_tolerance_seconds} seconds'
+    )
+    click.echo(
+        'Maximum end calibration: '
+        f'{config.timeline.max_end_calibration_seconds} seconds'
+    )
 
 
 @cli.command('db-check')
@@ -226,11 +283,24 @@ def create_run_command(
     default=None,
     help='Сколько выбранных кадров обработать. Если не задано, обрабатывается все видео',
 )
+@click.option(
+    '--start-time',
+    type=str,
+    default=None,
+    help='Ручное время начала: MM-DD-YYYY Day HH:MM:SS',
+)
+@click.option(
+    '--no-prompt',
+    is_flag=True,
+    help='Завершить с ошибкой вместо запроса ручного времени',
+)
 def process_video_command(
     config_path: str,
     video_path: str,
     start_frame: int,
     limit: int | None,
+    start_time: str | None,
+    no_prompt: bool,
 ) -> None:
     '''
     Полная обработка видео: регистрация, запуск pipeline, сохранение визитов;
@@ -244,6 +314,7 @@ def process_video_command(
         raise click.ClickException('limit должен быть >= 1')
 
     config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
     engine = make_engine(config)
     session_factory = make_session_factory(engine)
     session = session_factory()
@@ -303,23 +374,24 @@ def process_video_command(
     )
 
     stage_ranges = {
-        'registration': (0.0, 1.0),
-        'video': (1.0, 92.0),
-        'ocr': (92.0, 98.0),
-        'save': (98.0, 99.4),
-        'sessions': (99.4, 99.8),
-        'completed': (99.8, 100.0),
+        'registration': (0.0, 2.0),
+        'timeline': (2.0, 8.0),
+        'video': (8.0, 90.0),
+        'save': (90.0, 97.0),
+        'sessions': (97.0, 99.0),
+        'completed': (99.0, 100.0),
     }
     stage_labels = {
         'registration': 'PechVision: registration',
+        'timeline': 'PechVision: timeline',
         'video': 'PechVision: video analysis',
-        'ocr': 'PechVision: OCR',
         'save': 'PechVision: saving results',
         'sessions': 'PechVision: building visit sessions',
         'completed': 'PechVision: completed',
     }
     current_progress_stage = None
     video_progress_started_at = None
+    video_start_timestamp_seconds = None
 
     def update_progress(
         stage: str,
@@ -327,7 +399,9 @@ def process_video_command(
         total: int | None,
         details: dict | None,
     ) -> None:
-        nonlocal current_progress_stage, video_progress_started_at
+        nonlocal current_progress_stage
+        nonlocal video_progress_started_at
+        nonlocal video_start_timestamp_seconds
 
         stage_range = stage_ranges.get(stage)
 
@@ -360,10 +434,23 @@ def process_video_command(
 
             if stage == 'video':
                 video_progress_started_at = monotonic()
+                video_start_timestamp_seconds = (
+                    details.get('timestamp_seconds')
+                    if details is not None
+                    else None
+                )
 
+        inference_frames = (
+            details.get('inference_frames')
+            if details is not None
+            else None
+        )
         should_refresh_details = (
             stage != 'video'
-            or completed % 100 == 0
+            or (
+                inference_frames is not None
+                and inference_frames % 25 == 0
+            )
             or total is not None and completed >= total
         )
 
@@ -372,16 +459,27 @@ def process_video_command(
                 timestamp_seconds = details.get('timestamp_seconds')
                 postfix = {
                     'frame': details.get('frame_index'),
+                    'mode': details.get('mode'),
+                    'inference': inference_frames,
                 }
 
-                if video_progress_started_at is not None:
+                if (
+                    video_progress_started_at is not None
+                    and timestamp_seconds is not None
+                    and video_start_timestamp_seconds is not None
+                ):
                     elapsed_seconds = (
                         monotonic() - video_progress_started_at
+                    )
+                    media_elapsed_seconds = max(
+                        0.0,
+                        timestamp_seconds
+                        - video_start_timestamp_seconds,
                     )
 
                     if elapsed_seconds > 0:
                         postfix['speed'] = (
-                            f'{completed / elapsed_seconds:.1f} frame/s'
+                            f'{media_elapsed_seconds / elapsed_seconds:.1f}x'
                         )
 
                 if timestamp_seconds is not None:
@@ -394,10 +492,9 @@ def process_video_command(
                     refresh=False,
                 )
 
-            elif stage == 'ocr' and details is not None:
+            elif stage == 'timeline' and details is not None:
                 progress_bar.set_postfix(
-                    ocr=f'{completed}/{total}',
-                    cache=details.get('cached_frames'),
+                    phase=details.get('phase'),
                     refresh=False,
                 )
 
@@ -439,14 +536,125 @@ def process_video_command(
         session.commit()
 
         update_progress('registration', 1, 1, None)
+        update_progress(
+            'timeline',
+            0,
+            2,
+            {'phase': 'start anchor'},
+        )
 
-        visits = build_visits_from_video(
+        anchor_resolution = resolve_ocr_time_anchor(
+            video_path=video_path,
+            metadata=metadata,
+            config=config,
+        )
+
+        if not anchor_resolution.succeeded:
+            manual_start_time = start_time
+
+            if manual_start_time is None and not no_prompt:
+                progress_bar.clear()
+                click.echo(
+                    f'OCR не определил начало: '
+                    f'{anchor_resolution.failure_reason}'
+                )
+                manual_start_time = click.prompt(
+                    'Введите время начала '
+                    '(MM-DD-YYYY Day HH:MM:SS)',
+                    type=str,
+                )
+
+            if manual_start_time is None:
+                raise RuntimeError(
+                    anchor_resolution.failure_reason
+                    or 'Не удалось определить начало видео'
+                )
+
+            anchor_resolution = apply_manual_time_anchor_fallback(
+                resolution=anchor_resolution,
+                manual_start_time=manual_start_time,
+                timezone_name=config.project.timezone,
+            )
+
+        if anchor_resolution.anchor is None:
+            raise RuntimeError(
+                'Временная опора отсутствует после разрешения времени'
+            )
+
+        update_progress(
+            'timeline',
+            1,
+            2,
+            {'phase': 'end validation'},
+        )
+        end_validation = validate_time_anchor_near_video_end(
+            video_path=video_path,
+            metadata=metadata,
+            config=config,
+            anchor=anchor_resolution.anchor,
+        )
+
+        if end_validation.status == EndTimeValidationStatus.MISMATCH:
+            raise RuntimeError(
+                'Временная шкала не прошла проверку около конца видео'
+            )
+
+        duration_seconds = metadata.get('duration_seconds')
+
+        if duration_seconds is None:
+            raise RuntimeError(
+                'В метаданных отсутствует длительность видео'
+            )
+
+        timeline = VideoTimeline(
+            start_anchor=anchor_resolution.anchor,
+            duration_seconds=duration_seconds,
+            calibration_anchor=end_validation.reference_anchor,
+        )
+        db_video = session.get(Video, video_id)
+
+        if db_video is None:
+            raise RuntimeError(f'Видео не найдено в БД: {video_id}')
+
+        db_video.recorded_start_at = timeline.recorded_start_at
+        db_video.recorded_end_at = timeline.recorded_end_at
+        db_video.extra_data = {
+            **(db_video.extra_data or {}),
+            'timeline': {
+                'anchor_source': anchor_resolution.status.value,
+                'time_scale': timeline.time_scale,
+                'calibrated': timeline.is_calibrated,
+                'end_validation_status': end_validation.status.value,
+                'end_difference_seconds': (
+                    end_validation.difference_seconds
+                ),
+                'start_attempts': [
+                    serialize_ocr_attempt(attempt)
+                    for attempt in anchor_resolution.attempts
+                ],
+                'end_attempts': [
+                    serialize_ocr_attempt(attempt)
+                    for attempt in end_validation.attempts
+                ],
+            },
+        }
+        session.commit()
+        update_progress(
+            'timeline',
+            2,
+            2,
+            {'phase': 'ready'},
+        )
+
+        pipeline_result = build_visits_from_video(
             config=config,
             video_path=video_path,
+            timeline=timeline,
             start_frame=start_frame,
             limit=limit,
             progress_callback=update_progress,
         )
+        visits = pipeline_result.visits
 
         save_stats = save_visits(
             session=session,
@@ -496,6 +704,26 @@ def process_video_command(
             'start_frame': start_frame,
             'limit': limit,
             'video_created': video_created,
+            'yolo_device': resolve_yolo_device(
+                config.detection.device
+            ),
+            'timeline': {
+                'anchor_source': anchor_resolution.status.value,
+                'calibrated': timeline.is_calibrated,
+                'time_scale': timeline.time_scale,
+                'recorded_start_at': (
+                    timeline.recorded_start_at.isoformat()
+                ),
+                'recorded_end_at': (
+                    timeline.recorded_end_at.isoformat()
+                ),
+                'end_validation_status': (
+                    end_validation.status.value
+                ),
+            },
+            'adaptive_processing': (
+                pipeline_result.stats.as_dict()
+            ),
             'visits_found': len(visits),
             'visits_created': save_stats['created'],
             'visits_skipped_existing': save_stats['skipped_existing'],
@@ -553,6 +781,33 @@ def process_video_command(
     click.echo(f'Limit: {limit}')
     click.echo(f'Visits found: {len(visits)}')
     click.echo(f'Visits created: {save_stats["created"]}')
+    click.echo(
+        f'YOLO device: '
+        f'{resolve_yolo_device(config.detection.device)}'
+    )
+    click.echo(
+        f'Inference frames: '
+        f'{pipeline_result.stats.inference_frames}'
+    )
+    click.echo(
+        f'Active frames: '
+        f'{pipeline_result.stats.active_frames}'
+    )
+    click.echo(
+        f'Idle frames: '
+        f'{pipeline_result.stats.idle_frames}'
+    )
+    click.echo(
+        f'Idle transitions: '
+        f'{pipeline_result.stats.idle_transitions}'
+    )
+    click.echo(
+        f'Wakeups: {pipeline_result.stats.wakeups}'
+    )
+    click.echo(
+        f'Rewound frames: '
+        f'{pipeline_result.stats.rewound_frames}'
+    )
     click.echo(
         f'Visit sessions total: '
         f'{session_stats["sessions_total"]}'
@@ -612,6 +867,17 @@ def process_video_command(
     default=None,
     help='Сколько выбранных кадров обработать. Если не задано, обрабатывается все видео',
 )
+@click.option(
+    '--start-time',
+    type=str,
+    default=None,
+    help='Ручное время начала: MM-DD-YYYY Day HH:MM:SS',
+)
+@click.option(
+    '--no-prompt',
+    is_flag=True,
+    help='Завершить с ошибкой вместо запроса ручного времени',
+)
 @click.pass_context
 def run_mvp_command(
     ctx: click.Context,
@@ -619,6 +885,8 @@ def run_mvp_command(
     video_path: str,
     start_frame: int,
     limit: int | None,
+    start_time: str | None,
+    no_prompt: bool,
 ) -> None:
     '''
     MVP-запуск полного текущего pipeline;
@@ -631,6 +899,8 @@ def run_mvp_command(
         video_path=video_path,
         start_frame=start_frame,
         limit=limit,
+        start_time=start_time,
+        no_prompt=no_prompt,
     )
 
 
@@ -845,7 +1115,7 @@ def match_receipts_command(config_path: str, video_id: int | None) -> None:
     session = session_factory()
 
     try:
-        stats = match_receipts_to_visits(
+        stats = match_receipts_to_visit_sessions(
             session=session,
             config=config,
             video_id=video_id,
@@ -861,11 +1131,59 @@ def match_receipts_command(config_path: str, video_id: int | None) -> None:
     click.echo('RECEIPT MATCHING FINISHED')
     click.echo('-' * 20)
     click.echo(f'Video ID: {video_label}')
-    click.echo(f'Visits checked: {stats["visits_checked"]}')
+    click.echo(
+        f'Visit sessions checked: '
+        f'{stats["sessions_checked"]}'
+    )
     click.echo(f'Matches created: {stats["matches_created"]}')
-    click.echo(f'Matches skipped existing: {stats["matches_skipped_existing"]}')
-    click.echo(f'Visits without receipt: {stats["visits_without_receipt"]}')
+    click.echo(f'Matches updated: {stats["matches_updated"]}')
+    click.echo(
+        f'Matches unchanged: {stats["matches_unchanged"]}'
+    )
+    click.echo(f'Matches deleted: {stats["matches_deleted"]}')
+    click.echo(
+        f'Visit sessions without receipt: '
+        f'{stats["sessions_without_receipt"]}'
+    )
     click.echo(f'Ambiguous matches: {stats["ambiguous_matches"]}')
+    click.echo(
+        f'Group flags updated: '
+        f'{stats["group_flags_updated"]}'
+    )
+
+
+@cli.command('export-report')
+@click.argument(
+    'config_path',
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    '--output',
+    type=click.Path(dir_okay=False),
+    default=None,
+    help='Путь к итоговому XLSX-файлу',
+)
+def export_report_command(
+    config_path: str,
+    output: str | None,
+) -> None:
+    '''Формирует управленческий Excel-отчет.'''
+
+    from pechvision.reports.excel_export import export_report
+
+    try:
+        report_path = export_report(
+            config_path=config_path,
+            output_path=output,
+        )
+    except Exception as exc:
+        raise click.ClickException(
+            f'Ошибка формирования Excel-отчета: {exc}'
+        ) from exc
+
+    click.echo('EXCEL REPORT CREATED')
+    click.echo('-' * 20)
+    click.echo(f'File: {report_path}')
 
 
 @cli.command('video-frames-check')
@@ -921,6 +1239,146 @@ def video_frames_check_command(
             break
 
     click.echo(f'Printed: {printed}')
+
+
+@cli.command('timeline-check')
+@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
+@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    '--start-time',
+    type=str,
+    default=None,
+    help='Ручное время начала: MM-DD-YYYY Day HH:MM:SS',
+)
+@click.option(
+    '--no-prompt',
+    is_flag=True,
+    help='Не запрашивать ручное время при неудаче OCR',
+)
+def timeline_check_command(
+    config_path: str,
+    video_path: str,
+    start_time: str | None,
+    no_prompt: bool,
+) -> None:
+    '''Проверяет временную шкалу непрерывного видео.'''
+
+    config = load_config(config_path)
+    metadata = read_video_metadata(video_path)
+    resolution = resolve_ocr_time_anchor(
+        video_path=video_path,
+        metadata=metadata,
+        config=config,
+    )
+
+    if not resolution.succeeded:
+        manual_start_time = start_time
+
+        if manual_start_time is None and not no_prompt:
+            click.echo(
+                f'OCR не определил начало: '
+                f'{resolution.failure_reason}'
+            )
+            manual_start_time = click.prompt(
+                'Введите время начала '
+                '(MM-DD-YYYY Day HH:MM:SS)',
+                type=str,
+            )
+
+        if manual_start_time is not None:
+            resolution = apply_manual_time_anchor_fallback(
+                resolution=resolution,
+                manual_start_time=manual_start_time,
+                timezone_name=config.project.timezone,
+            )
+
+    click.echo('TIMELINE CHECK')
+    click.echo('-' * 20)
+    click.echo(f'Video: {video_path}')
+
+    consistent_frame_indices = {
+        attempt.frame_index
+        for attempt in resolution.consistent_attempts
+    }
+
+    for attempt in resolution.attempts:
+        click.echo(
+            f'Offset={attempt.requested_offset_seconds}s; '
+            f'frame={attempt.frame_index}; '
+            f'text={attempt.raw_text!r}; '
+            f'parsed={attempt.parsed_datetime}; '
+            f'start='
+            f'{attempt.anchor.recorded_start_at if attempt.anchor else None}; '
+            f'consistent='
+            f'{attempt.frame_index in consistent_frame_indices}'
+        )
+
+    if resolution.anchor is None:
+        raise click.ClickException(
+            resolution.failure_reason
+            or 'Не удалось определить начало видео'
+        )
+
+    duration_seconds = metadata.get('duration_seconds')
+
+    if duration_seconds is None:
+        raise click.ClickException(
+            'В метаданных отсутствует длительность видео'
+        )
+
+    end_validation = validate_time_anchor_near_video_end(
+        video_path=video_path,
+        metadata=metadata,
+        config=config,
+        anchor=resolution.anchor,
+    )
+    timeline = VideoTimeline(
+        start_anchor=resolution.anchor,
+        duration_seconds=duration_seconds,
+        calibration_anchor=end_validation.reference_anchor,
+    )
+
+    click.echo('End OCR attempts:')
+
+    end_consistent_frame_indices = {
+        attempt.frame_index
+        for attempt in end_validation.consistent_attempts
+    }
+
+    for attempt in end_validation.attempts:
+        click.echo(
+            f'Offset={attempt.requested_offset_seconds:.3f}s; '
+            f'frame={attempt.frame_index}; '
+            f'text={attempt.raw_text!r}; '
+            f'parsed={attempt.parsed_datetime}; '
+            f'start='
+            f'{attempt.anchor.recorded_start_at if attempt.anchor else None}; '
+            f'consistent='
+            f'{attempt.frame_index in end_consistent_frame_indices}'
+        )
+
+    click.echo('-' * 20)
+    click.echo(f'Anchor source: {resolution.status.value}')
+    click.echo(f'Recorded start: {timeline.recorded_start_at}')
+    click.echo(f'Recorded end: {timeline.recorded_end_at}')
+    click.echo(f'Time scale: {timeline.time_scale:.12f}')
+    click.echo(f'Timeline calibrated: {timeline.is_calibrated}')
+    click.echo(f'End validation: {end_validation.status.value}')
+    click.echo(
+        f'End difference seconds: '
+        f'{end_validation.difference_seconds}'
+    )
+
+    if end_validation.failure_reason is not None:
+        click.echo(
+            f'End validation note: '
+            f'{end_validation.failure_reason}'
+        )
+
+    if end_validation.status == EndTimeValidationStatus.MISMATCH:
+        raise click.ClickException(
+            'Временная шкала не прошла проверку около конца видео'
+        )
 
 
 @cli.command('ocr-crop-check')
@@ -1742,146 +2200,4 @@ def visits_check_command(
             f'duration: {visit["duration_seconds"]}; '
             f'observations: {visit["observations_count"]}; '
             f'best_confidence: {visit["best_confidence"]:.4f}'
-        )
-
-
-@cli.command('visits-ocr-check')
-@click.argument('config_path', type=click.Path(exists=True, dir_okay=False))
-@click.argument('video_path', type=click.Path(exists=True, dir_okay=False))
-@click.option(
-    '--start-frame',
-    type=int,
-    default=0,
-    show_default=True,
-    help='Первый кадр диапазона проверки',
-)
-@click.option(
-    '--limit',
-    type=int,
-    default=300,
-    show_default=True,
-    help='Сколько выбранных кадров обработать',
-)
-def visits_ocr_check_command(
-    config_path: str,
-    video_path: str,
-    start_frame: int,
-    limit: int,
-) -> None:
-    '''
-    Проверка формирования визитов с OCR-временем входа и выхода;
-    [Arg]: config_path, video_path, start_frame, limit
-    '''
-
-    if start_frame < 0:
-        raise click.ClickException('start_frame должен быть >= 0')
-
-    if limit < 1:
-        raise click.ClickException('limit должен быть >= 1')
-
-    config = load_config(config_path)
-    metadata = read_video_metadata(video_path)
-
-    visits_builder = VisitsBuilder(
-        max_missing_seconds=config.tracking.max_missing_seconds,
-        min_visit_seconds=config.video.min_visit_seconds,
-    )
-
-    processed_frames = 0
-    frames_with_tracks = 0
-    frames_with_tracks_in_zone = 0
-
-    for frame_data in iter_video_frames_range(
-        path=video_path,
-        frame_step=config.video.frame_step,
-        start_frame=start_frame,
-        limit=limit,
-        metadata=metadata,
-    ):
-        processed_frames += 1
-
-        frame_index = frame_data['frame_index']
-        timestamp_seconds = frame_data['timestamp_seconds']
-        frame = frame_data['frame']
-
-        tracks = track_people(
-            frame=frame,
-            detection_config=config.detection,
-            tracking_config=config.tracking,
-        )
-        tracks_in_zone = filter_detections_in_zone(
-            detections=tracks,
-            zone_config=config.cashier_zone,
-        )
-
-        if tracks:
-            frames_with_tracks += 1
-
-        if tracks_in_zone:
-            frames_with_tracks_in_zone += 1
-
-        visits_builder.update(
-            frame_index=frame_index,
-            timestamp_seconds=timestamp_seconds,
-            tracks_in_zone=tracks_in_zone,
-        )
-
-    visits = visits_builder.finish_all()
-
-    visits_with_ocr = []
-
-    for visit in visits:
-        entry_frame = read_video_frame(
-            path=video_path,
-            frame_index=visit['entry_frame_index'],
-        )
-        entry_crop = crop_frame(entry_frame, config.ocr.crop)
-        entry_text, ocr_entered_at = recognize_datetime_from_crop(
-            entry_crop,
-            config.ocr,
-        )
-
-        exit_frame = read_video_frame(
-            path=video_path,
-            frame_index=visit['exit_frame_index'],
-        )
-        exit_crop = crop_frame(exit_frame, config.ocr.crop)
-        exit_text, ocr_left_at = recognize_datetime_from_crop(
-            exit_crop,
-            config.ocr,
-        )
-
-        visit_with_ocr = visit.copy()
-        visit_with_ocr['ocr_entry_text'] = entry_text
-        visit_with_ocr['ocr_exit_text'] = exit_text
-        visit_with_ocr['ocr_entered_at'] = ocr_entered_at
-        visit_with_ocr['ocr_left_at'] = ocr_left_at
-
-        visits_with_ocr.append(visit_with_ocr)
-
-    click.echo('VISITS OCR CHECK FINISHED')
-    click.echo('-' * 20)
-    click.echo(f'Video: {video_path}')
-    click.echo(f'Start frame: {start_frame}')
-    click.echo(f'Frame step: {config.video.frame_step}')
-    click.echo(f'Limit: {limit}')
-    click.echo(f'Processed frames: {processed_frames}')
-    click.echo(f'Frames with tracks: {frames_with_tracks}')
-    click.echo(f'Frames with tracks in zone: {frames_with_tracks_in_zone}')
-    click.echo(f'Visits found: {len(visits)}')
-    click.echo(f'Visits with OCR: {len(visits_with_ocr)}')
-    click.echo('')
-
-    for visit in visits_with_ocr:
-        click.echo(
-            f'Track ID: {visit["track_id"]}; '
-            f'entry_frame: {visit["entry_frame_index"]}; '
-            f'exit_frame: {visit["exit_frame_index"]}; '
-            f'duration: {visit["duration_seconds"]}; '
-            f'ocr_entered_at: {visit["ocr_entered_at"]}; '
-            f'ocr_left_at: {visit["ocr_left_at"]}'
-        )
-        click.echo(
-            f'  OCR entry text: {visit["ocr_entry_text"]}; '
-            f'OCR exit text: {visit["ocr_exit_text"]}'
         )

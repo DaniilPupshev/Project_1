@@ -76,18 +76,11 @@ def build_visit_extra_data(visit: dict[str, Any]) -> dict[str, Any]:
 
     return {
         'source_track_id': visit.get('track_id'),
-        'ocr_entry_text': visit.get('ocr_entry_text'),
-        'ocr_exit_text': visit.get('ocr_exit_text'),
-        'ocr_entry_frame_index': visit.get('ocr_entry_frame_index'),
-        'ocr_exit_frame_index': visit.get('ocr_exit_frame_index'),
-        'ocr_entry_candidates_count': visit.get('ocr_entry_candidates_count'),
-        'ocr_exit_candidates_count': visit.get('ocr_exit_candidates_count'),
-        'ocr_duration_difference_seconds': visit.get(
-            'ocr_duration_difference_seconds'
-        ),
-        'ocr_rejection_reason': visit.get('ocr_rejection_reason'),
         'entry_timestamp_seconds': visit.get('entry_timestamp_seconds'),
         'exit_timestamp_seconds': visit.get('exit_timestamp_seconds'),
+        'time_source': visit.get('time_source'),
+        'timeline_calibrated': visit.get('timeline_calibrated'),
+        'timeline_time_scale': visit.get('timeline_time_scale'),
         'observations_count': visit.get('observations_count'),
         'best_confidence': visit.get('best_confidence'),
         'best_face': build_best_face_extra_data(visit.get('best_face')),
@@ -163,7 +156,7 @@ def save_best_face_for_visit(
         }
 
     embedding = best_face.get('embedding')
-    seen_at = db_visit.entered_at or db_visit.ocr_entered_at
+    seen_at = db_visit.entered_at
 
     identity_eligible = bool(
         best_face.get('is_identity_eligible', False)
@@ -376,8 +369,8 @@ def save_visits(
     total_visits = len(visits)
 
     for visit_index, visit in enumerate(visits, start=1):
-        entered_at = visit.get('entered_at') or visit.get('ocr_entered_at')
-        left_at = visit.get('left_at') or visit.get('ocr_left_at')
+        entered_at = visit.get('entered_at')
+        left_at = visit.get('left_at')
         track_id = f'{video_id}_{visit["track_id"]}'
 
         event_key = build_visit_event_key(video_id, visit)
@@ -405,14 +398,12 @@ def save_visits(
             processing_run_id=processing_run_id,
             person_id=None,
             track_id=track_id,
-            visit_date=entered_at.date() if entered_at else left_at.date() if left_at else None,
+            visit_date=visit.get('visit_date'),
             entered_at=entered_at,
             left_at=left_at,
             duration_seconds=visit.get('duration_seconds'),
             entry_frame_index=visit.get('entry_frame_index'),
             exit_frame_index=visit.get('exit_frame_index'),
-            ocr_entered_at=visit.get('ocr_entered_at'),
-            ocr_left_at=visit.get('ocr_left_at'),
             time_is_estimated=visit.get('time_is_estimated', True),
             is_staff=False,
             staff_id=None,

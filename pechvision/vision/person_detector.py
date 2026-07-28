@@ -2,14 +2,51 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import torch
 from ultralytics import YOLO
 
 from pechvision.config.schema import DetectionConfig
 
 
+@lru_cache(maxsize=3)
+def resolve_yolo_device(requested_device: str) -> str:
+    '''Определяет доступное устройство для запуска YOLO.'''
+
+    if requested_device == 'cpu':
+        return 'cpu'
+
+    mps_available = (
+        torch.backends.mps.is_built()
+        and torch.backends.mps.is_available()
+    )
+
+    if requested_device == 'mps':
+        if not mps_available:
+            raise RuntimeError(
+                'YOLO device=mps, но Apple Metal недоступен '
+                'в текущей установке PyTorch'
+            )
+
+        return 'mps'
+
+    if requested_device == 'auto':
+        return 'mps' if mps_available else 'cpu'
+
+    raise ValueError(
+        f'Неизвестное устройство YOLO: {requested_device}'
+    )
+
+
 @lru_cache(maxsize=4)
 def get_person_detector(model_path: str) -> YOLO:
     '''Загрузка и переиспользование YOLO модели'''
+
+    return YOLO(model_path)
+
+
+@lru_cache(maxsize=4)
+def get_person_tracker(model_path: str) -> YOLO:
+    '''Загружает отдельный экземпляр YOLO для трекинга.'''
 
     return YOLO(model_path)
 
@@ -26,6 +63,7 @@ def detect_people(frame, config: DetectionConfig) -> list[dict[str, Any]]:
 
     results = model.predict(
         source=frame,
+        device=resolve_yolo_device(config.device),
         conf=config.confidence_threshold,
         iou=config.iou_threshold,
         classes=[config.person_class_id],

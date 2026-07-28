@@ -49,6 +49,20 @@ video:
     - .mov
 
 
+processing:
+  # Интервал анализа кадров в активном режиме, в секундах медиавремени
+  active_interval_seconds: 0.12
+
+  # Интервал проверки кадров в режиме простоя; в 10 раз реже активного режима
+  idle_interval_seconds: 1.2
+
+  # Через сколько секунд без людей включать режим простоя
+  idle_after_seconds: 30.0
+
+  # На сколько секунд возвращаться назад после обнаружения человека в простое
+  wakeup_rewind_seconds: 2.0
+
+
 ocr:
   # Включает или отключает OCR времени с изображения видео
   enabled: true
@@ -71,14 +85,36 @@ ocr:
     # Высота OCR-области в пикселях
     height: 100
 
-  # Если true, OCR читается в основном на событиях входа/выхода, а не на каждом кадре
-  read_on_events_only: true
+timeline:
+  # Позиции от начала видео, на которых выполняются попытки OCR
+  anchor_search_offsets_seconds:
+    - 0
+    - 2
+    - 5
+    - 10
+    - 20
+    - 30
 
-  # Максимальный разрыв в секундах, при котором время можно восстановить интерполяцией
-  max_interpolation_gap_seconds: 300
+  # Минимальное количество согласованных результатов OCR
+  minimum_consistent_anchors: 2
 
-  # Радиус поиска OCR-времени около кадра входа или выхода
-  event_frame_search_seconds: 3
+  # Допустимое расхождение рассчитанного времени начала видео
+  anchor_consistency_tolerance_seconds: 2.0
+
+  # Позиции перед концом видео для независимой проверки временной шкалы
+  end_validation_offsets_before_end_seconds:
+    - 30
+    - 10
+    - 2
+
+  # Минимальное количество согласованных OCR-результатов около конца
+  minimum_consistent_end_anchors: 2
+
+  # Максимально допустимое расхождение начала по стартовому и конечному OCR
+  end_validation_tolerance_seconds: 2.0
+
+  # Максимальный дрейф за видео, который можно исправить линейной калибровкой
+  max_end_calibration_seconds: 10.0
 
 
 cashier_zone:
@@ -98,6 +134,9 @@ cashier_zone:
 detection:
   # Путь к локальной модели детекции людей
   model_path: data/models/yolo/yolo11n.pt
+
+  # Устройство YOLO: auto выбирает Apple GPU при доступности, иначе CPU
+  device: auto
 
   # Минимальная уверенность детекции человека
   confidence_threshold: 0.45

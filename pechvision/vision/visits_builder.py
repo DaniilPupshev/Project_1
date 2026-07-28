@@ -254,8 +254,14 @@ class VisitsBuilder:
     def finish_all(self) -> list[dict[str, Any]]:
         '''Завершение всех активных визитов и сохранение результатов'''
 
+        self.finish_active()
+
+        return self.finished_visits
+
+
+    def finish_active(self) -> None:
+        '''Завершает активные визиты, сохраняя возможность продолжить сбор.'''
+
         for track_id in list(self.active_visits):
             active_visit = self.active_visits.pop(track_id)
             self._finish_visit(active_visit)
-
-        return self.finished_visits

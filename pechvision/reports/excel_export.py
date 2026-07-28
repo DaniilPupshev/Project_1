@@ -26,6 +26,7 @@ from pechvision.db.models import (
     ReceiptMatch,
     Video,
     Visit,
+    VisitSession,
 )
 from pechvision.db.session import make_engine, make_session_factory
 
@@ -84,14 +85,20 @@ def yes_no(value: bool) -> str:
     return 'Да' if value else 'Нет'
 
 
-def visit_dating_method(visit: Visit) -> str:
-    if visit.entered_at is None or visit.left_at is None:
+def visit_session_dating_method(
+    visit_session: VisitSession,
+    source_visits: list[Visit],
+) -> str:
+    if (
+        visit_session.entered_at is None
+        or visit_session.left_at is None
+    ):
         return 'Не определено'
 
-    if visit.time_is_estimated:
-        return 'Восстановлено'
+    if any(visit.time_is_estimated for visit in source_visits):
+        return 'Шкала видео, старт введён вручную'
 
-    return 'OCR'
+    return 'Шкала видео, старт определён OCR'
 
 
 def select_best_face(faces: list[Face]) -> Face | None:
@@ -167,13 +174,15 @@ def build_person_profile(
 
 def infer_video_days(
     videos: list[Video],
-    visits: list[Visit],
+    visit_sessions: list[VisitSession],
 ) -> dict[int, date | None]:
     dates_by_video: dict[int, list[date]] = defaultdict(list)
 
-    for visit in visits:
-        if visit.visit_date is not None:
-            dates_by_video[visit.video_id].append(visit.visit_date)
+    for visit_session in visit_sessions:
+        if visit_session.visit_date is not None:
+            dates_by_video[visit_session.video_id].append(
+                visit_session.visit_date
+            )
 
     result: dict[int, date | None] = {}
 
@@ -190,11 +199,14 @@ def infer_video_days(
     return result
 
 
-def resolve_visit_day(
-    visit: Visit,
+def resolve_visit_session_day(
+    visit_session: VisitSession,
     video_days: dict[int, date | None],
 ) -> date | None:
-    return visit.visit_date or video_days.get(visit.video_id)
+    return (
+        visit_session.visit_date
+        or video_days.get(visit_session.video_id)
+    )
 
 
 def create_thumbnail_buffer(path: str | None) -> BytesIO | None:
@@ -317,6 +329,15 @@ def build_report_data(session: Session) -> dict[str, Any]:
     videos = list(session.scalars(select(Video).order_by(Video.id)))
     runs = list(session.scalars(select(ProcessingRun).order_by(ProcessingRun.id)))
     visits = list(session.scalars(select(Visit).order_by(Visit.video_id, Visit.id)))
+    visit_sessions = list(
+        session.scalars(
+            select(VisitSession).order_by(
+                VisitSession.video_id,
+                VisitSession.entered_at,
+                VisitSession.id,
+            )
+        )
+    )
     faces = list(session.scalars(select(Face).order_by(Face.id)))
     persons = list(session.scalars(select(Person).order_by(Person.id)))
     receipts = list(session.scalars(select(Receipt).order_by(Receipt.closed_at, Receipt.id)))
@@ -344,19 +365,49 @@ def build_report_data(session: Session) -> dict[str, Any]:
     }
 
     visits_by_id = {visit.id: visit for visit in visits}
+    visit_sessions_by_id = {
+        visit_session.id: visit_session
+        for visit_session in visit_sessions
+    }
     receipts_by_id = {receipt.id: receipt for receipt in receipts}
     videos_by_id = {video.id: video for video in videos}
+    visits_by_session: dict[int, list[Visit]] = defaultdict(list)
+
+    for visit in visits:
+        if visit.visit_session_id is not None:
+            visits_by_session[visit.visit_session_id].append(
+                visit
+            )
+
+    session_faces: dict[int, Face | None] = {}
+
+    for visit_session in visit_sessions:
+        session_face_candidates = [
+            face
+            for visit in visits_by_session.get(
+                visit_session.id,
+                [],
+            )
+            for face in faces_by_visit.get(visit.id, [])
+        ]
+        session_faces[visit_session.id] = select_best_face(
+            session_face_candidates
+        )
+
     matches_by_receipt: dict[int, list[ReceiptMatch]] = defaultdict(list)
-    matches_by_visit: dict[int, list[ReceiptMatch]] = defaultdict(list)
+    matches_by_session: dict[int, list[ReceiptMatch]] = defaultdict(list)
 
     for match in matches:
         matches_by_receipt[match.receipt_id].append(match)
-        matches_by_visit[match.visit_id].append(match)
+        matches_by_session[match.visit_session_id].append(
+            match
+        )
 
     return {
         'videos': videos,
         'runs': runs,
         'visits': visits,
+        'visit_sessions': visit_sessions,
         'faces': faces,
         'persons': persons,
         'receipts': receipts,
@@ -364,31 +415,40 @@ def build_report_data(session: Session) -> dict[str, Any]:
         'visit_faces': visit_faces,
         'person_profiles': person_profiles,
         'visits_by_id': visits_by_id,
+        'visit_sessions_by_id': visit_sessions_by_id,
+        'visits_by_session': visits_by_session,
+        'session_faces': session_faces,
         'receipts_by_id': receipts_by_id,
         'videos_by_id': videos_by_id,
         'matches_by_receipt': matches_by_receipt,
-        'matches_by_visit': matches_by_visit,
-        'video_days': infer_video_days(videos, visits),
+        'matches_by_session': matches_by_session,
+        'video_days': infer_video_days(
+            videos,
+            visit_sessions,
+        ),
     }
 
 
 def calculate_daily_metrics(data: dict[str, Any]) -> list[dict[str, Any]]:
-    visits: list[Visit] = data['visits']
+    visit_sessions: list[VisitSession] = data['visit_sessions']
     receipts: list[Receipt] = data['receipts']
     matches: list[ReceiptMatch] = data['matches']
     profiles: dict[int, dict[str, Any]] = data['person_profiles']
     receipts_by_id: dict[int, Receipt] = data['receipts_by_id']
     video_days: dict[int, date | None] = data['video_days']
 
-    visits_by_day: dict[date, list[Visit]] = defaultdict(list)
+    sessions_by_day: dict[date, list[VisitSession]] = defaultdict(list)
     receipts_by_day: dict[date, list[Receipt]] = defaultdict(list)
     matches_by_day: dict[date, list[ReceiptMatch]] = defaultdict(list)
 
-    for visit in visits:
-        day = resolve_visit_day(visit, video_days)
+    for visit_session in visit_sessions:
+        day = resolve_visit_session_day(
+            visit_session,
+            video_days,
+        )
 
         if day is not None:
-            visits_by_day[day].append(visit)
+            sessions_by_day[day].append(visit_session)
 
     for receipt in receipts:
         receipts_by_day[receipt.closed_at.date()].append(receipt)
@@ -399,17 +459,17 @@ def calculate_daily_metrics(data: dict[str, Any]) -> list[dict[str, Any]]:
         if receipt is not None:
             matches_by_day[receipt.closed_at.date()].append(match)
 
-    days = sorted(set(visits_by_day) | set(receipts_by_day))
+    days = sorted(set(sessions_by_day) | set(receipts_by_day))
     result = []
 
     for day in days:
-        day_visits = visits_by_day.get(day, [])
+        day_sessions = sessions_by_day.get(day, [])
         day_receipts = receipts_by_day.get(day, [])
         day_matches = matches_by_day.get(day, [])
         person_ids = {
-            visit.person_id
-            for visit in day_visits
-            if visit.person_id is not None
+            visit_session.person_id
+            for visit_session in day_sessions
+            if visit_session.person_id is not None
         }
         genders = [
             profiles[person_id]['gender']
@@ -433,24 +493,26 @@ def calculate_daily_metrics(data: dict[str, Any]) -> list[dict[str, Any]]:
 
         result.append({
             'day': day,
-            'visits': len(day_visits),
+            'visits': len(day_sessions),
             'timed_visits': sum(
-                visit.entered_at is not None and visit.left_at is not None
-                for visit in day_visits
+                visit_session.entered_at is not None
+                and visit_session.left_at is not None
+                for visit_session in day_sessions
             ),
             'estimated_visits': sum(
-                visit.entered_at is not None
-                and visit.left_at is not None
-                and visit.time_is_estimated
-                for visit in day_visits
+                visit_session.entered_at is not None
+                and visit_session.left_at is not None
+                and visit_session.time_is_estimated
+                for visit_session in day_sessions
             ),
             'missing_time_visits': sum(
-                visit.entered_at is None or visit.left_at is None
-                for visit in day_visits
+                visit_session.entered_at is None
+                or visit_session.left_at is None
+                for visit_session in day_sessions
             ),
             'identified_visits': sum(
-                visit.person_id is not None
-                for visit in day_visits
+                visit_session.person_id is not None
+                for visit_session in day_sessions
             ),
             'unique_persons': len(person_ids),
             'male': genders.count('male'),
@@ -490,15 +552,15 @@ def calculate_total_metrics(
     data: dict[str, Any],
     daily_metrics: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    visits: list[Visit] = data['visits']
+    visit_sessions: list[VisitSession] = data['visit_sessions']
     receipts: list[Receipt] = data['receipts']
     matches: list[ReceiptMatch] = data['matches']
     profiles: dict[int, dict[str, Any]] = data['person_profiles']
     receipts_by_id: dict[int, Receipt] = data['receipts_by_id']
     person_ids = {
-        visit.person_id
-        for visit in visits
-        if visit.person_id is not None
+        visit_session.person_id
+        for visit_session in visit_sessions
+        if visit_session.person_id is not None
     }
     genders = [
         profiles[person_id]['gender']
@@ -513,14 +575,17 @@ def calculate_total_metrics(
     matched_receipt_ids = {match.receipt_id for match in matches}
     receipt_match_counts = Counter(match.receipt_id for match in matches)
     timed_visits = [
-        visit
-        for visit in visits
-        if visit.entered_at is not None and visit.left_at is not None
+        visit_session
+        for visit_session in visit_sessions
+        if (
+            visit_session.entered_at is not None
+            and visit_session.left_at is not None
+        )
     ]
     durations = [
-        float(visit.duration_seconds)
-        for visit in visits
-        if visit.duration_seconds is not None
+        float(visit_session.duration_seconds)
+        for visit_session in visit_sessions
+        if visit_session.duration_seconds is not None
     ]
 
     return {
@@ -534,15 +599,15 @@ def calculate_total_metrics(
         ),
         'videos': len(data['videos']),
         'finished_runs': sum(run.status == 'finished' for run in data['runs']),
-        'visits': len(visits),
+        'visits': len(visit_sessions),
         'timed_visits': len(timed_visits),
         'estimated_timed_visits': sum(
             visit.time_is_estimated
             for visit in timed_visits
         ),
         'identified_visits': sum(
-            visit.person_id is not None
-            for visit in visits
+            visit_session.person_id is not None
+            for visit_session in visit_sessions
         ),
         'unique_persons': len(person_ids),
         'male': genders.count('male'),
@@ -622,18 +687,21 @@ def build_general_sheet(
     indicators = [
         ('Обработано видео', total['videos']),
         ('Успешных запусков', total['finished_runs']),
-        ('Всего визитов', total['visits']),
-        ('Визитов со временем', total['timed_visits']),
-        ('Идентифицировано визитов', total['identified_visits']),
+        ('Логических посещений', total['visits']),
+        ('Посещений со временем', total['timed_visits']),
+        ('Идентифицировано посещений', total['identified_visits']),
         ('Уникальных персон', total['unique_persons']),
         ('Всего чеков', total['receipts']),
         ('Сопоставлено чеков', total['matched_receipts']),
         ('Покрытие чеков', total['coverage'] / 100),
-        ('Средняя длительность визита, сек.', total['average_duration']),
+        ('Средняя длительность посещения, сек.', total['average_duration']),
         ('Общая выручка', total['revenue']),
         ('Сопоставленная выручка', total['matched_revenue']),
         ('Неоднозначных совпадений', total['ambiguous_matches']),
-        ('Чеков с несколькими визитами', total['receipts_with_multiple_visits']),
+        (
+            'Чеков с несколькими посетителями',
+            total['receipts_with_multiple_visits'],
+        ),
     ]
 
     for index, (label, value) in enumerate(indicators):
@@ -655,7 +723,7 @@ def build_general_sheet(
     table_row = 16
     headers = [
         'Дата',
-        'Визитов',
+        'Посещений',
         'Уникальных персон',
         'Чеков',
         'Совпадений',
@@ -740,11 +808,12 @@ def build_general_sheet(
     worksheet.cell(notes_row, 1, 'Как читать отчёт').fill = SECTION_FILL
     worksheet.cell(notes_row, 1).font = Font(bold=True, size=12)
     notes = [
-        'Совпадение — уникальный чек, для которого найден хотя бы один визит.',
+        'Совпадение — уникальный чек, для которого найдено хотя бы одно логическое посещение.',
         'Покрытие — доля сопоставленных уникальных чеков от всех чеков.',
-        'Один чек может быть связан с несколькими визитами; сумма чека учитывается один раз.',
+        'Один чек может быть связан с несколькими посетителями '
+        'группы; сумма чека учитывается один раз.',
         'Пол и возраст являются приблизительной оценкой модели компьютерного зрения.',
-        'Восстановленное время рассчитано по соседним OCR-меткам и длительности трека.',
+        'Время посещений рассчитано по единой временной шкале непрерывного видео.',
         'Фотографии лиц предназначены только для внутреннего использования '
         'с ограниченным доступом.',
     ]
@@ -788,8 +857,8 @@ def build_people_summary_sheet(
         'Пол не определён',
         'Средний возраст',
         'Без оценки возраста',
-        'Всего визитов',
-        'Идентифицировано визитов',
+        'Логических посещений',
+        'Идентифицировано посещений',
         'Чеков',
         'Совпадений',
         'Покрытие, %',
@@ -891,13 +960,13 @@ def build_receipts_sheet(
         'Торговая точка',
         'Номер стола',
         'Статус',
-        'Связанных визитов',
+        'Связанных посещений',
         'ID персон',
-        'ID визитов',
+        'ID посещений',
         'Способ датирования',
         'Мин. разница, сек.',
         'Неоднозначное совпадение',
-        'Несколько связанных визитов',
+        'Несколько посетителей',
         'Группа подтверждена',
         *photo_headers,
         'Комментарий',
@@ -911,16 +980,21 @@ def build_receipts_sheet(
     )
     header_row = 4
     write_headers(worksheet, header_row, headers)
-    visits_by_id: dict[int, Visit] = data['visits_by_id']
+    visit_sessions_by_id: dict[int, VisitSession] = (
+        data['visit_sessions_by_id']
+    )
     matches_by_receipt: dict[int, list[ReceiptMatch]] = data['matches_by_receipt']
-    visit_faces: dict[int, Face | None] = data['visit_faces']
+    session_faces: dict[int, Face | None] = data['session_faces']
+    visits_by_session: dict[int, list[Visit]] = data[
+        'visits_by_session'
+    ]
 
     for row_index, receipt in enumerate(data['receipts'], start=header_row + 1):
         receipt_matches = matches_by_receipt.get(receipt.id, [])
-        matched_visits = [
-            visits_by_id[match.visit_id]
+        matched_sessions = [
+            visit_sessions_by_id[match.visit_session_id]
             for match in receipt_matches
-            if match.visit_id in visits_by_id
+            if match.visit_session_id in visit_sessions_by_id
         ]
         opened_at = as_local_excel_datetime(receipt.opened_at, timezone)
         closed_at = as_local_excel_datetime(receipt.closed_at, timezone)
@@ -930,13 +1004,16 @@ def build_receipts_sheet(
             service_minutes = (closed_at - opened_at).total_seconds() / 60
 
         person_ids = sorted({
-            visit.person_id
-            for visit in matched_visits
-            if visit.person_id is not None
+            visit_session.person_id
+            for visit_session in matched_sessions
+            if visit_session.person_id is not None
         })
         dating_methods = sorted({
-            visit_dating_method(visit)
-            for visit in matched_visits
+            visit_session_dating_method(
+                visit_session,
+                visits_by_session.get(visit_session.id, []),
+            )
+            for visit_session in matched_sessions
         })
         values = [
             receipt.external_receipt_id,
@@ -948,16 +1025,19 @@ def build_receipts_sheet(
             receipt.tt,
             receipt.table_number,
             'Сопоставлен' if receipt_matches else 'Не сопоставлен',
-            len(matched_visits),
+            len(matched_sessions),
             ', '.join(map(str, person_ids)) or 'Не определено',
-            ', '.join(str(visit.id) for visit in matched_visits) or 'Не определено',
+            ', '.join(
+                str(visit_session.id)
+                for visit_session in matched_sessions
+            ) or 'Не определено',
             ', '.join(dating_methods) or 'Не определено',
             min(
                 (match.time_delta_seconds for match in receipt_matches),
                 default=None,
             ),
             yes_no(any(match.is_ambiguous for match in receipt_matches)),
-            yes_no(len(matched_visits) > 1),
+            yes_no(len(matched_sessions) > 1),
             yes_no(
                 any(match.is_group_match for match in receipt_matches)
             ),
@@ -971,12 +1051,12 @@ def build_receipts_sheet(
         for photo_index in range(MAX_RECEIPT_PHOTOS):
             column = photo_start_column + photo_index
 
-            if photo_index >= len(matched_visits):
+            if photo_index >= len(matched_sessions):
                 worksheet.cell(row_index, column, '—')
                 continue
 
-            visit = matched_visits[photo_index]
-            face = visit_faces.get(visit.id)
+            visit_session = matched_sessions[photo_index]
+            face = session_faces.get(visit_session.id)
             insert_photo(
                 worksheet=worksheet,
                 cell_coordinate=f'{get_column_letter(column)}{row_index}',
@@ -988,11 +1068,13 @@ def build_receipts_sheet(
         source_column = comment_column + 1
         comments = []
 
-        if len(matched_visits) > MAX_RECEIPT_PHOTOS:
+        if len(matched_sessions) > MAX_RECEIPT_PHOTOS:
             comments.append('Показаны не все фотографии')
 
-        if len(matched_visits) > 1:
-            comments.append('Один чек связан с несколькими визитами')
+        if len(matched_sessions) > 1:
+            comments.append(
+                'Один чек связан с несколькими посетителями'
+            )
 
         if any(match.is_ambiguous for match in receipt_matches):
             comments.append('Было несколько чеков-кандидатов')
@@ -1003,7 +1085,9 @@ def build_receipts_sheet(
             '; '.join(comments) or '—',
         )
         worksheet.cell(row_index, source_column, receipt.source_file)
-        worksheet.row_dimensions[row_index].height = 78 if matched_visits else 24
+        worksheet.row_dimensions[row_index].height = (
+            78 if matched_sessions else 24
+        )
         worksheet.cell(row_index, 2).number_format = 'DD.MM.YYYY'
         worksheet.cell(row_index, 3).number_format = 'DD.MM.YYYY HH:MM:SS'
         worksheet.cell(row_index, 4).number_format = 'DD.MM.YYYY HH:MM:SS'
@@ -1055,23 +1139,21 @@ def build_visits_sheet(
 ) -> None:
     worksheet = workbook.create_sheet('Сводка по визитам')
     headers = [
-        'ID визита',
+        'ID посещения',
         'ID персоны',
         'Фото в момент визита',
         'Дата визита',
-        'Дата определена по видео',
         'Время входа',
         'Время выхода',
         'Длительность, сек.',
         'Кадр входа',
         'Кадр выхода',
         'Способ датирования',
-        'OCR на входе',
-        'OCR на выходе',
-        'Причина отклонения OCR',
         'ID видео',
         'Имя видео',
-        'ID трека',
+        'Количество фрагментов',
+        'ID исходных фрагментов',
+        'ID треков',
         'Лицо пригодно',
         'Качество лица',
         'Пол',
@@ -1080,53 +1162,78 @@ def build_visits_sheet(
         'Сумма чека',
         'Разница по времени, сек.',
         'Неоднозначное совпадение',
-        'Персонал',
-        'Группа',
+        'Групповая покупка',
+        'Время расчетное',
+        'Ключ посещения',
     ]
     add_sheet_title(
         worksheet,
         'Сводка по визитам',
-        'Одна строка соответствует одному зафиксированному визиту в кассовой зоне.',
+        'Одна строка соответствует одному логическому посещению; краткие потери трека объединены.',
         len(headers),
     )
     header_row = 4
     write_headers(worksheet, header_row, headers)
     videos_by_id: dict[int, Video] = data['videos_by_id']
     receipts_by_id: dict[int, Receipt] = data['receipts_by_id']
-    matches_by_visit: dict[int, list[ReceiptMatch]] = data['matches_by_visit']
-    visit_faces: dict[int, Face | None] = data['visit_faces']
+    matches_by_session: dict[int, list[ReceiptMatch]] = data[
+        'matches_by_session'
+    ]
+    session_faces: dict[int, Face | None] = data['session_faces']
+    visits_by_session: dict[int, list[Visit]] = data[
+        'visits_by_session'
+    ]
     video_days: dict[int, date | None] = data['video_days']
 
-    for row_index, visit in enumerate(data['visits'], start=header_row + 1):
-        face = visit_faces.get(visit.id)
-        video = videos_by_id.get(visit.video_id)
-        visit_matches = matches_by_visit.get(visit.id, [])
+    for row_index, visit_session in enumerate(
+        data['visit_sessions'],
+        start=header_row + 1,
+    ):
+        source_visits = visits_by_session.get(
+            visit_session.id,
+            [],
+        )
+        face = session_faces.get(visit_session.id)
+        video = videos_by_id.get(visit_session.video_id)
+        visit_matches = matches_by_session.get(
+            visit_session.id,
+            [],
+        )
         linked_receipts = [
             receipts_by_id[match.receipt_id]
             for match in visit_matches
             if match.receipt_id in receipts_by_id
         ]
-        extra_data = visit.extra_data or {}
-        inferred_day = video_days.get(visit.video_id)
-        display_day = visit.visit_date or inferred_day
+        inferred_day = video_days.get(visit_session.video_id)
+        display_day = visit_session.visit_date or inferred_day
         values = [
-            visit.id,
-            visit.person_id or 'Не определено',
+            visit_session.id,
+            visit_session.person_id or 'Не определено',
             None,
             display_day,
-            yes_no(visit.visit_date is None and inferred_day is not None),
-            as_local_excel_datetime(visit.entered_at, timezone),
-            as_local_excel_datetime(visit.left_at, timezone),
-            visit.duration_seconds,
-            visit.entry_frame_index,
-            visit.exit_frame_index,
-            visit_dating_method(visit),
-            extra_data.get('ocr_entry_text') or 'Не определено',
-            extra_data.get('ocr_exit_text') or 'Не определено',
-            extra_data.get('ocr_rejection_reason') or '—',
-            visit.video_id,
+            as_local_excel_datetime(
+                visit_session.entered_at,
+                timezone,
+            ),
+            as_local_excel_datetime(
+                visit_session.left_at,
+                timezone,
+            ),
+            visit_session.duration_seconds,
+            visit_session.entry_frame_index,
+            visit_session.exit_frame_index,
+            visit_session_dating_method(
+                visit_session,
+                source_visits,
+            ),
+            visit_session.video_id,
             video.filename if video else 'Не определено',
-            visit.track_id,
+            visit_session.segments_count,
+            ', '.join(str(visit.id) for visit in source_visits),
+            ', '.join(
+                str(visit.track_id)
+                for visit in source_visits
+            ),
             yes_no(bool(face and face.is_identity_eligible)),
             face.identity_quality_score if face else None,
             russian_gender(face.gender if face else None),
@@ -1147,8 +1254,9 @@ def build_visits_sheet(
                 default=None,
             ),
             yes_no(any(match.is_ambiguous for match in visit_matches)),
-            yes_no(visit.is_staff),
-            yes_no(visit.is_group),
+            yes_no(any(match.is_group_match for match in visit_matches)),
+            yes_no(visit_session.time_is_estimated),
+            visit_session.session_key,
         ]
 
         for column, value in enumerate(values, start=1):
@@ -1162,24 +1270,24 @@ def build_visits_sheet(
         )
         worksheet.row_dimensions[row_index].height = 78 if face else 24
         worksheet.cell(row_index, 4).number_format = 'DD.MM.YYYY'
+        worksheet.cell(row_index, 5).number_format = 'DD.MM.YYYY HH:MM:SS'
         worksheet.cell(row_index, 6).number_format = 'DD.MM.YYYY HH:MM:SS'
-        worksheet.cell(row_index, 7).number_format = 'DD.MM.YYYY HH:MM:SS'
-        worksheet.cell(row_index, 8).number_format = '0.0'
-        worksheet.cell(row_index, 19).number_format = '0.000'
-        worksheet.cell(row_index, 21).number_format = '0'
-        worksheet.cell(row_index, 23).number_format = '#,##0.00 [$₽-ru-RU]'
-        worksheet.cell(row_index, 24).number_format = '0.0'
+        worksheet.cell(row_index, 7).number_format = '0.0'
+        worksheet.cell(row_index, 17).number_format = '0.000'
+        worksheet.cell(row_index, 19).number_format = '0'
+        worksheet.cell(row_index, 21).number_format = '#,##0.00 [$₽-ru-RU]'
+        worksheet.cell(row_index, 22).number_format = '0.0'
 
-        dating_cell = worksheet.cell(row_index, 11)
+        dating_cell = worksheet.cell(row_index, 10)
 
-        if dating_cell.value == 'OCR':
+        if dating_cell.value == 'Шкала видео, старт определён OCR':
             dating_cell.fill = SUCCESS_FILL
-        elif dating_cell.value == 'Восстановлено':
+        elif dating_cell.value == 'Шкала видео, старт введён вручную':
             dating_cell.fill = WARNING_FILL
         else:
             dating_cell.fill = ERROR_FILL
 
-    end_row = header_row + len(data['visits'])
+    end_row = header_row + len(data['visit_sessions'])
     style_data_range(worksheet, header_row + 1, end_row, len(headers))
     worksheet.auto_filter.ref = (
         f'A{header_row}:{get_column_letter(len(headers))}{end_row}'
@@ -1188,16 +1296,15 @@ def build_visits_sheet(
     widths = {column: 17 for column in range(1, len(headers) + 1)}
     widths.update({
         3: 16,
-        5: 23,
+        5: 21,
         6: 21,
-        7: 21,
-        11: 20,
-        12: 30,
-        13: 30,
-        14: 30,
-        16: 24,
-        22: 38,
-        25: 22,
+        10: 34,
+        12: 28,
+        14: 26,
+        15: 26,
+        20: 38,
+        23: 22,
+        26: 38,
     })
     set_widths(worksheet, widths)
 
@@ -1217,7 +1324,7 @@ def build_person_registry_sheet(
         'Первое появление',
         'Последнее появление',
         'Дней посещения',
-        'Количество визитов',
+        'Количество посещений',
         'Связанных чеков',
         'Сумма уникальных чеков',
         'Эталонных лиц',
@@ -1232,27 +1339,40 @@ def build_person_registry_sheet(
     )
     header_row = 4
     write_headers(worksheet, header_row, headers)
-    visits_by_person: dict[int, list[Visit]] = defaultdict(list)
+    sessions_by_person: dict[int, list[VisitSession]] = defaultdict(list)
     video_days: dict[int, date | None] = data['video_days']
-    matches_by_visit: dict[int, list[ReceiptMatch]] = data['matches_by_visit']
+    matches_by_session: dict[int, list[ReceiptMatch]] = data[
+        'matches_by_session'
+    ]
     receipts_by_id: dict[int, Receipt] = data['receipts_by_id']
 
-    for visit in data['visits']:
-        if visit.person_id is not None:
-            visits_by_person[visit.person_id].append(visit)
+    for visit_session in data['visit_sessions']:
+        if visit_session.person_id is not None:
+            sessions_by_person[visit_session.person_id].append(
+                visit_session
+            )
 
     for row_index, person in enumerate(data['persons'], start=header_row + 1):
         profile = data['person_profiles'][person.id]
-        person_visits = visits_by_person.get(person.id, [])
+        person_sessions = sessions_by_person.get(person.id, [])
         days = {
-            resolve_visit_day(visit, video_days)
-            for visit in person_visits
-            if resolve_visit_day(visit, video_days) is not None
+            resolve_visit_session_day(
+                visit_session,
+                video_days,
+            )
+            for visit_session in person_sessions
+            if resolve_visit_session_day(
+                visit_session,
+                video_days,
+            ) is not None
         }
         receipt_ids = {
             match.receipt_id
-            for visit in person_visits
-            for match in matches_by_visit.get(visit.id, [])
+            for visit_session in person_sessions
+            for match in matches_by_session.get(
+                visit_session.id,
+                [],
+            )
         }
         reference_faces: list[Face] = profile['reference_faces']
         poses = sorted({
@@ -1273,7 +1393,7 @@ def build_person_registry_sheet(
             as_local_excel_datetime(person.first_seen_at, timezone),
             as_local_excel_datetime(person.last_seen_at, timezone),
             len(days),
-            len(person_visits),
+            len(person_sessions),
             len(receipt_ids),
             sum(
                 (receipts_by_id[receipt_id].amount or Decimal('0'))
@@ -1332,13 +1452,13 @@ def build_quality_sheet(
     worksheet = workbook.create_sheet('Качество данных')
     headers = [
         'Дата',
-        'Всего визитов',
+        'Логических посещений',
         'Время определено',
-        'Время восстановлено',
+        'Старт введён вручную',
         'Время отсутствует',
         'Лицо найдено',
         'Лицо пригодно',
-        'Визит идентифицирован',
+        'Посещение идентифицировано',
         'Неоднозначных совпадений',
         'Чеков',
         'Совпадений',
@@ -1348,19 +1468,22 @@ def build_quality_sheet(
     add_sheet_title(
         worksheet,
         'Качество исходных данных и обработки',
-        'Лист показывает полноту OCR, распознавания лиц и сопоставления с чеками.',
+        'Лист показывает полноту временной шкалы, распознавания лиц и сопоставления с чеками.',
         len(headers),
     )
     header_row = 4
     write_headers(worksheet, header_row, headers)
     video_days: dict[int, date | None] = data['video_days']
-    visit_faces: dict[int, Face | None] = data['visit_faces']
+    session_faces: dict[int, Face | None] = data['session_faces']
     faces_found_by_day: Counter[date] = Counter()
     eligible_by_day: Counter[date] = Counter()
 
-    for visit in data['visits']:
-        day = resolve_visit_day(visit, video_days)
-        face = visit_faces.get(visit.id)
+    for visit_session in data['visit_sessions']:
+        day = resolve_visit_session_day(
+            visit_session,
+            video_days,
+        )
+        face = session_faces.get(visit_session.id)
 
         if day is None or face is None:
             continue

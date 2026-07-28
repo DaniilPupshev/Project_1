@@ -1,7 +1,16 @@
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field, PositiveInt
+from pydantic import (
+    BaseModel,
+    Field,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
 
 
 class ProjectConfig(BaseModel):
@@ -29,6 +38,29 @@ class VideoConfig(BaseModel):
     supported_extensions: list[str]
 
 
+class ProcessingConfig(BaseModel):
+    active_interval_seconds: PositiveFloat
+    idle_interval_seconds: PositiveFloat
+    idle_after_seconds: PositiveFloat
+    wakeup_rewind_seconds: NonNegativeFloat
+
+    @model_validator(mode='after')
+    def validate_intervals(self) -> Self:
+        if self.idle_interval_seconds <= self.active_interval_seconds:
+            raise ValueError(
+                'idle_interval_seconds должен быть больше '
+                'active_interval_seconds'
+            )
+
+        if self.wakeup_rewind_seconds >= self.idle_after_seconds:
+            raise ValueError(
+                'wakeup_rewind_seconds должен быть меньше '
+                'idle_after_seconds'
+            )
+
+        return self
+
+
 class CropConfig(BaseModel):
     x: int = Field(ge=0)
     y: int = Field(ge=0)
@@ -40,9 +72,6 @@ class OCRConfig(BaseModel):
     enabled: bool
     datetime_format: str
     crop: CropConfig
-    read_on_events_only: bool
-    max_interpolation_gap_seconds: PositiveInt
-    event_frame_search_seconds: int = Field(default=3, ge=0)
 
 
 class CashierZoneConfig(BaseModel):
@@ -52,6 +81,7 @@ class CashierZoneConfig(BaseModel):
 
 class DetectionConfig(BaseModel):
     model_path: Path
+    device: Literal['auto', 'cpu', 'mps']
     confidence_threshold: float = Field(ge=0.0, le=1.0)
     iou_threshold: float = Field(ge=0.0, le=1.0)
     person_class_id: int = Field(ge=0)
@@ -121,12 +151,98 @@ class VisitSessionsConfig(BaseModel):
     merge_timeout_seconds: PositiveInt
 
 
+class TimelineConfig(BaseModel):
+    anchor_search_offsets_seconds: list[NonNegativeInt] = Field(
+        min_length=1,
+    )
+    minimum_consistent_anchors: PositiveInt
+    anchor_consistency_tolerance_seconds: float = Field(ge=0.0)
+    end_validation_offsets_before_end_seconds: list[
+        NonNegativeInt
+    ] = Field(
+        min_length=1,
+    )
+    minimum_consistent_end_anchors: PositiveInt
+    end_validation_tolerance_seconds: float = Field(ge=0.0)
+    max_end_calibration_seconds: float = Field(ge=0.0)
+
+    @field_validator('anchor_search_offsets_seconds')
+    @classmethod
+    def validate_anchor_search_offsets_seconds(
+        cls,
+        value: list[int],
+    ) -> list[int]:
+        if value[0] != 0:
+            raise ValueError(
+                'Первое смещение поиска временной опоры должно быть 0'
+            )
+
+        if value != sorted(value):
+            raise ValueError(
+                'Смещения поиска временной опоры должны идти по возрастанию'
+            )
+
+        if len(value) != len(set(value)):
+            raise ValueError(
+                'Смещения поиска временной опоры не должны повторяться'
+            )
+
+        return value
+
+    @field_validator('end_validation_offsets_before_end_seconds')
+    @classmethod
+    def validate_end_validation_offsets(
+        cls,
+        value: list[int],
+    ) -> list[int]:
+        if value != sorted(value, reverse=True):
+            raise ValueError(
+                'Смещения проверки конца должны идти по убыванию'
+            )
+
+        if len(value) != len(set(value)):
+            raise ValueError(
+                'Смещения проверки конца не должны повторяться'
+            )
+
+        return value
+
+    @model_validator(mode='after')
+    def validate_consistent_anchors_count(self) -> Self:
+        available_anchors = len(
+            self.anchor_search_offsets_seconds
+        )
+
+        if self.minimum_consistent_anchors > available_anchors:
+            raise ValueError(
+                'minimum_consistent_anchors не может быть больше '
+                'количества anchor_search_offsets_seconds'
+            )
+
+        available_end_anchors = len(
+            self.end_validation_offsets_before_end_seconds
+        )
+
+        if (
+            self.minimum_consistent_end_anchors
+            > available_end_anchors
+        ):
+            raise ValueError(
+                'minimum_consistent_end_anchors не может быть больше '
+                'количества end_validation_offsets_before_end_seconds'
+            )
+
+        return self
+
+
 class AppConfig(BaseModel):
     project: ProjectConfig
     database: DatabaseConfig
     paths: PathsConfig
     video: VideoConfig
+    processing: ProcessingConfig
     ocr: OCRConfig
+    timeline: TimelineConfig
     cashier_zone: CashierZoneConfig
     detection: DetectionConfig
     tracking: TrackingConfig
